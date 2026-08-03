@@ -9,6 +9,9 @@
         "git init": true,
         "git checkout": true,
         "git add": true,
-        "git commit": true
+        "git commit": true,
+        "git push": true,
+        "git fetch": true,
+        "git rebase": true
     }
 }
