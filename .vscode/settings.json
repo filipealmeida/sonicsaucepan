@@ -12,6 +12,8 @@
         "git commit": true,
         "git push": true,
         "git fetch": true,
-        "git rebase": true
+        "git rebase": true,
+        "npm run build": true,
+        "npm run dev": true
     }
 }
