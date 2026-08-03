@@ -46,6 +46,26 @@ pub struct FilterConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectConfig {
+    Compression {
+        threshold_db: f32,
+        ratio: f32,
+        makeup_gain_db: f32,
+    },
+    Distortion {
+        drive: f32,
+        mix: f32,
+    },
+    Phase {
+        rate_hz: f32,
+        depth: f32,
+        mix: f32,
+        feedback: f32,
+    },
+    Chorus {
+        rate_hz: f32,
+        depth_ms: f32,
+        mix: f32,
+    },
     Delay {
         mix: f32,
         feedback: f32,
@@ -55,6 +75,17 @@ pub enum EffectConfig {
         mix: f32,
         room_size: f32,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EffectPreset {
+    Clean,
+    WarmPad,
+    AmbientWash,
+    LofiDrive,
+    ClubPunch,
+    SpaceEcho,
+    DreamChorus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,6 +113,207 @@ impl Default for SynthConfig {
             waveform: Waveform::Sine,
             filter: None,
             effects: Vec::new(),
+        }
+    }
+}
+
+impl EffectPreset {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::WarmPad => "warm_pad",
+            Self::AmbientWash => "ambient_wash",
+            Self::LofiDrive => "lofi_drive",
+            Self::ClubPunch => "club_punch",
+            Self::SpaceEcho => "space_echo",
+            Self::DreamChorus => "dream_chorus",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Clean => "Minimal processing for a transparent baseline",
+            Self::WarmPad => "Soft pad texture with compression, chorus, and reverb",
+            Self::AmbientWash => "Wide, slow, spacious atmosphere with delay and reverb",
+            Self::LofiDrive => "Gritty, filtered, slightly saturated lo-fi tone",
+            Self::ClubPunch => "Tighter, compressed, punchier club-style sound",
+            Self::SpaceEcho => "Echo-forward, roomy, and spacious with phase movement",
+            Self::DreamChorus => "Dreamy shimmering chorus with supportive reverb",
+        }
+    }
+
+    pub fn apply_to_config(self, config: &mut SynthConfig) {
+        config.effects = self.effects();
+        match self {
+            Self::Clean => {
+                config.waveform = Waveform::Sine;
+                config.filter = None;
+                config.master_gain = 0.2;
+            }
+            Self::WarmPad => {
+                config.waveform = Waveform::Triangle;
+                config.filter = Some(FilterConfig {
+                    enabled: true,
+                    cutoff_hz: 3_200.0,
+                    resonance: 0.0,
+                });
+                config.master_gain = 0.18;
+            }
+            Self::AmbientWash => {
+                config.waveform = Waveform::Sine;
+                config.filter = Some(FilterConfig {
+                    enabled: true,
+                    cutoff_hz: 4_800.0,
+                    resonance: 0.0,
+                });
+                config.master_gain = 0.16;
+            }
+            Self::LofiDrive => {
+                config.waveform = Waveform::Saw;
+                config.filter = Some(FilterConfig {
+                    enabled: true,
+                    cutoff_hz: 1_800.0,
+                    resonance: 0.0,
+                });
+                config.master_gain = 0.22;
+            }
+            Self::ClubPunch => {
+                config.waveform = Waveform::Square;
+                config.filter = Some(FilterConfig {
+                    enabled: true,
+                    cutoff_hz: 2_800.0,
+                    resonance: 0.0,
+                });
+                config.master_gain = 0.25;
+            }
+            Self::SpaceEcho => {
+                config.waveform = Waveform::Sine;
+                config.filter = None;
+                config.master_gain = 0.18;
+            }
+            Self::DreamChorus => {
+                config.waveform = Waveform::Triangle;
+                config.filter = Some(FilterConfig {
+                    enabled: true,
+                    cutoff_hz: 5_500.0,
+                    resonance: 0.0,
+                });
+                config.master_gain = 0.17;
+            }
+        }
+    }
+
+    pub fn effects(self) -> Vec<EffectConfig> {
+        match self {
+            Self::Clean => vec![],
+            Self::WarmPad => vec![
+                EffectConfig::Compression {
+                    threshold_db: -20.0,
+                    ratio: 2.5,
+                    makeup_gain_db: 2.5,
+                },
+                EffectConfig::Chorus {
+                    rate_hz: 0.25,
+                    depth_ms: 10.0,
+                    mix: 0.28,
+                },
+                EffectConfig::Reverb {
+                    mix: 0.22,
+                    room_size: 0.62,
+                },
+            ],
+            Self::AmbientWash => vec![
+                EffectConfig::Compression {
+                    threshold_db: -24.0,
+                    ratio: 2.0,
+                    makeup_gain_db: 1.0,
+                },
+                EffectConfig::Phase {
+                    rate_hz: 0.28,
+                    depth: 0.9,
+                    mix: 0.22,
+                    feedback: 0.08,
+                },
+                EffectConfig::Chorus {
+                    rate_hz: 0.55,
+                    depth_ms: 14.0,
+                    mix: 0.30,
+                },
+                EffectConfig::Delay {
+                    mix: 0.24,
+                    feedback: 0.35,
+                    time_ms: 360.0,
+                },
+                EffectConfig::Reverb {
+                    mix: 0.34,
+                    room_size: 0.88,
+                },
+            ],
+            Self::LofiDrive => vec![
+                EffectConfig::Compression {
+                    threshold_db: -14.0,
+                    ratio: 4.0,
+                    makeup_gain_db: 1.5,
+                },
+                EffectConfig::Distortion {
+                    drive: 1.5,
+                    mix: 0.38,
+                },
+                EffectConfig::Delay {
+                    mix: 0.16,
+                    feedback: 0.22,
+                    time_ms: 220.0,
+                },
+            ],
+            Self::ClubPunch => vec![
+                EffectConfig::Compression {
+                    threshold_db: -10.0,
+                    ratio: 5.5,
+                    makeup_gain_db: 4.0,
+                },
+                EffectConfig::Distortion {
+                    drive: 0.8,
+                    mix: 0.18,
+                },
+                EffectConfig::Delay {
+                    mix: 0.10,
+                    feedback: 0.18,
+                    time_ms: 140.0,
+                },
+            ],
+            Self::SpaceEcho => vec![
+                EffectConfig::Phase {
+                    rate_hz: 0.18,
+                    depth: 0.7,
+                    mix: 0.16,
+                    feedback: 0.05,
+                },
+                EffectConfig::Delay {
+                    mix: 0.30,
+                    feedback: 0.42,
+                    time_ms: 480.0,
+                },
+                EffectConfig::Reverb {
+                    mix: 0.28,
+                    room_size: 0.95,
+                },
+            ],
+            Self::DreamChorus => vec![
+                EffectConfig::Compression {
+                    threshold_db: -22.0,
+                    ratio: 2.2,
+                    makeup_gain_db: 1.2,
+                },
+                EffectConfig::Chorus {
+                    rate_hz: 0.8,
+                    depth_ms: 11.0,
+                    mix: 0.36,
+                },
+                EffectConfig::Reverb {
+                    mix: 0.24,
+                    room_size: 0.80,
+                },
+            ],
         }
     }
 }
@@ -433,6 +665,38 @@ fn apply_filter_chain(samples: &mut [f32], config: &SynthConfig, sample_rate: f3
 fn apply_effect_chain(samples: &mut [f32], config: &SynthConfig) {
     for effect in &config.effects {
         match effect {
+            EffectConfig::Compression {
+                threshold_db,
+                ratio,
+                makeup_gain_db,
+            } => apply_compression(samples, *threshold_db, *ratio, *makeup_gain_db),
+            EffectConfig::Distortion { drive, mix } => {
+                apply_distortion(samples, *drive, *mix)
+            }
+            EffectConfig::Phase {
+                rate_hz,
+                depth,
+                mix,
+                feedback,
+            } => apply_phase(
+                samples,
+                config.sample_rate as f32,
+                *rate_hz,
+                *depth,
+                *mix,
+                *feedback,
+            ),
+            EffectConfig::Chorus {
+                rate_hz,
+                depth_ms,
+                mix,
+            } => apply_chorus(
+                samples,
+                config.sample_rate as f32,
+                *rate_hz,
+                *depth_ms,
+                *mix,
+            ),
             EffectConfig::Delay {
                 mix,
                 feedback,
@@ -456,11 +720,164 @@ fn apply_effect_chain(samples: &mut [f32], config: &SynthConfig) {
                     *x = out.clamp(-1.0, 1.0);
                 }
             }
-            EffectConfig::Reverb { .. } => {
-                // Reserved for future implementation.
+            EffectConfig::Reverb { mix, room_size } => {
+                apply_reverb(samples, config.sample_rate as f32, *mix, *room_size)
             }
         }
     }
+}
+
+fn apply_compression(samples: &mut [f32], threshold_db: f32, ratio: f32, makeup_gain_db: f32) {
+    let ratio = ratio.max(1.0);
+    let threshold_amp = db_to_amp(threshold_db);
+    let makeup_amp = db_to_amp(makeup_gain_db);
+
+    for x in samples.iter_mut() {
+        let sign = x.signum();
+        let amp = x.abs();
+        let compressed = if amp <= threshold_amp {
+            amp
+        } else {
+            threshold_amp + (amp - threshold_amp) / ratio
+        };
+        *x = (sign * compressed * makeup_amp).clamp(-1.0, 1.0);
+    }
+}
+
+fn apply_distortion(samples: &mut [f32], drive: f32, mix: f32) {
+    let drive = drive.max(0.0);
+    let mix = mix.clamp(0.0, 1.0);
+    let dry = 1.0 - mix;
+
+    for x in samples.iter_mut() {
+        let distorted = (*x * (1.0 + drive)).tanh();
+        *x = ((*x * dry) + (distorted * mix)).clamp(-1.0, 1.0);
+    }
+}
+
+fn apply_phase(
+    samples: &mut [f32],
+    sample_rate: f32,
+    rate_hz: f32,
+    depth: f32,
+    mix: f32,
+    feedback: f32,
+) {
+    let rate_hz = rate_hz.max(0.01);
+    let depth = depth.clamp(0.0, 1.0);
+    let mix = mix.clamp(0.0, 1.0);
+    let dry = 1.0 - mix;
+    let feedback = feedback.clamp(-0.95, 0.95);
+
+    let max_delay_samples = 96usize;
+    let mut delay = vec![0.0f32; max_delay_samples + 2];
+    let mut write_idx = 0usize;
+    let mut fb = 0.0f32;
+
+    for (i, x) in samples.iter_mut().enumerate() {
+        let lfo = ((2.0 * PI * rate_hz * i as f32) / sample_rate).sin();
+        let delay_samples = 2.0 + (depth * 30.0 * (0.5 + 0.5 * lfo));
+        let read_pos = (write_idx as f32 - delay_samples).rem_euclid(delay.len() as f32);
+        let delayed = interp_circular(&delay, read_pos);
+
+        let wet = delayed;
+        let input = *x + (fb * feedback);
+        delay[write_idx] = input;
+        fb = wet;
+
+        *x = ((*x * dry) + (wet * mix)).clamp(-1.0, 1.0);
+        write_idx = (write_idx + 1) % delay.len();
+    }
+}
+
+fn apply_chorus(samples: &mut [f32], sample_rate: f32, rate_hz: f32, depth_ms: f32, mix: f32) {
+    let rate_hz = rate_hz.max(0.01);
+    let mix = mix.clamp(0.0, 1.0);
+    let dry = 1.0 - mix;
+    let depth_samples = ((depth_ms.max(0.1) / 1000.0) * sample_rate).max(1.0);
+    let base_delay = (0.018 * sample_rate).max(1.0); // ~18 ms
+    let max_delay = (base_delay + depth_samples + 2.0) as usize;
+
+    let mut delay = vec![0.0f32; max_delay + 2];
+    let mut write_idx = 0usize;
+
+    for (i, x) in samples.iter_mut().enumerate() {
+        let lfo1 = ((2.0 * PI * rate_hz * i as f32) / sample_rate).sin();
+        let lfo2 = ((2.0 * PI * (rate_hz * 1.13) * i as f32) / sample_rate).sin();
+
+        let d1 = base_delay + depth_samples * (0.5 + 0.5 * lfo1);
+        let d2 = base_delay * 0.7 + depth_samples * (0.5 + 0.5 * lfo2);
+
+        let r1 = (write_idx as f32 - d1).rem_euclid(delay.len() as f32);
+        let r2 = (write_idx as f32 - d2).rem_euclid(delay.len() as f32);
+
+        let wet = 0.5 * (interp_circular(&delay, r1) + interp_circular(&delay, r2));
+        delay[write_idx] = *x;
+        *x = ((*x * dry) + (wet * mix)).clamp(-1.0, 1.0);
+
+        write_idx = (write_idx + 1) % delay.len();
+    }
+}
+
+fn apply_reverb(samples: &mut [f32], sample_rate: f32, mix: f32, room_size: f32) {
+    let mix = mix.clamp(0.0, 1.0);
+    if mix <= 0.0 {
+        return;
+    }
+
+    let room_size = room_size.clamp(0.1, 1.0);
+    let mut wet = vec![0.0f32; samples.len()];
+
+    let comb_times = [0.0297, 0.0371, 0.0411, 0.0437];
+    for (idx, t) in comb_times.iter().enumerate() {
+        let len = ((*t * sample_rate * (0.7 + (0.3 * room_size))) as usize).max(1);
+        let mut buf = vec![0.0f32; len];
+        let mut w = 0usize;
+        let fb = (0.65 + 0.3 * room_size - idx as f32 * 0.03).clamp(0.2, 0.95);
+
+        for (i, x) in samples.iter().enumerate() {
+            let delayed = buf[w];
+            let y = delayed;
+            buf[w] = *x + delayed * fb;
+            wet[i] += y;
+            w = (w + 1) % len;
+        }
+    }
+
+    for y in &mut wet {
+        *y *= 0.25;
+    }
+
+    // Single all-pass diffusion stage.
+    let ap_len = ((0.005 * sample_rate) as usize).max(1);
+    let mut ap = vec![0.0f32; ap_len];
+    let mut w = 0usize;
+    let g = 0.5;
+    for y in &mut wet {
+        let delayed = ap[w];
+        let input = *y;
+        let output = -g * input + delayed;
+        ap[w] = input + g * delayed;
+        *y = output;
+        w = (w + 1) % ap_len;
+    }
+
+    let dry = 1.0 - mix;
+    for (x, y) in samples.iter_mut().zip(wet.into_iter()) {
+        *x = ((*x * dry) + (y * mix)).clamp(-1.0, 1.0);
+    }
+}
+
+fn db_to_amp(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
+}
+
+fn interp_circular(buffer: &[f32], pos: f32) -> f32 {
+    let len = buffer.len();
+    let i0 = pos.floor() as usize % len;
+    let i1 = (i0 + 1) % len;
+    let frac = pos - pos.floor();
+    (buffer[i0] * (1.0 - frac)) + (buffer[i1] * frac)
 }
 
 fn validate_midi_channel(channel_1_to_16: u8) -> Result<u8> {
@@ -569,6 +986,67 @@ fn quality_to_intervals(quality: &str) -> Result<&'static [u8]> {
     Ok(intervals)
 }
 
+pub fn preset_names() -> Vec<&'static str> {
+    vec![
+        EffectPreset::Clean.name(),
+        EffectPreset::WarmPad.name(),
+        EffectPreset::AmbientWash.name(),
+        EffectPreset::LofiDrive.name(),
+        EffectPreset::ClubPunch.name(),
+        EffectPreset::SpaceEcho.name(),
+        EffectPreset::DreamChorus.name(),
+    ]
+}
+
+pub fn preset_catalog() -> Vec<(EffectPreset, &'static str, &'static str)> {
+    vec![
+        (EffectPreset::Clean, EffectPreset::Clean.name(), EffectPreset::Clean.description()),
+        (
+            EffectPreset::WarmPad,
+            EffectPreset::WarmPad.name(),
+            EffectPreset::WarmPad.description(),
+        ),
+        (
+            EffectPreset::AmbientWash,
+            EffectPreset::AmbientWash.name(),
+            EffectPreset::AmbientWash.description(),
+        ),
+        (
+            EffectPreset::LofiDrive,
+            EffectPreset::LofiDrive.name(),
+            EffectPreset::LofiDrive.description(),
+        ),
+        (
+            EffectPreset::ClubPunch,
+            EffectPreset::ClubPunch.name(),
+            EffectPreset::ClubPunch.description(),
+        ),
+        (
+            EffectPreset::SpaceEcho,
+            EffectPreset::SpaceEcho.name(),
+            EffectPreset::SpaceEcho.description(),
+        ),
+        (
+            EffectPreset::DreamChorus,
+            EffectPreset::DreamChorus.name(),
+            EffectPreset::DreamChorus.description(),
+        ),
+    ]
+}
+
+pub fn effect_preset_by_name(name: &str) -> Option<EffectPreset> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "clean" => Some(EffectPreset::Clean),
+        "warm_pad" | "warmpad" | "warm-pad" => Some(EffectPreset::WarmPad),
+        "ambient_wash" | "ambientwash" | "ambient-wash" => Some(EffectPreset::AmbientWash),
+        "lofi_drive" | "lofidrive" | "lofi-drive" | "lofi" => Some(EffectPreset::LofiDrive),
+        "club_punch" | "clubpunch" | "club-punch" | "punch" => Some(EffectPreset::ClubPunch),
+        "space_echo" | "spaceecho" | "space-echo" => Some(EffectPreset::SpaceEcho),
+        "dream_chorus" | "dreamchorus" | "dream-chorus" => Some(EffectPreset::DreamChorus),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,5 +1078,57 @@ mod tests {
         assert!(validate_midi_channel(16).is_ok());
         assert!(validate_midi_channel(0).is_err());
         assert!(validate_midi_channel(17).is_err());
+    }
+
+    #[test]
+    fn preset_catalog_is_nontrivial() {
+        let names = preset_names();
+        assert!(names.len() >= 7);
+        assert!(effect_preset_by_name("warm-pad").is_some());
+        assert!(effect_preset_by_name("ambient_wash").is_some());
+        assert!(effect_preset_by_name("lofi").is_some());
+    }
+
+    #[test]
+    fn renders_with_full_effect_chain() {
+        let chord = chord_symbol_to_playable("Cmaj7", 4).expect("parse");
+        let cfg = SynthConfig {
+            bpm: 120.0,
+            beats_per_chord: 1.0,
+            sample_rate: 8_000,
+            effects: vec![
+                EffectConfig::Compression {
+                    threshold_db: -18.0,
+                    ratio: 3.0,
+                    makeup_gain_db: 2.0,
+                },
+                EffectConfig::Distortion { drive: 1.2, mix: 0.25 },
+                EffectConfig::Phase {
+                    rate_hz: 0.35,
+                    depth: 0.7,
+                    mix: 0.3,
+                    feedback: 0.2,
+                },
+                EffectConfig::Chorus {
+                    rate_hz: 0.8,
+                    depth_ms: 8.0,
+                    mix: 0.25,
+                },
+                EffectConfig::Delay {
+                    mix: 0.2,
+                    feedback: 0.3,
+                    time_ms: 180.0,
+                },
+                EffectConfig::Reverb {
+                    mix: 0.2,
+                    room_size: 0.7,
+                },
+            ],
+            ..SynthConfig::default()
+        };
+
+        let out = render_progression_mono(&[chord], &cfg).expect("render");
+        assert_eq!(out.len(), 4_000);
+        assert!(out.iter().all(|x| x.is_finite()));
     }
 }
