@@ -1,0 +1,16 @@
+{
+  "central_tone": "C",
+  "base_octave": 4,
+  "beats_per_chord": 4.0,
+  "chords": [
+    "Cmaj7",
+    "Am7",
+    {
+      "full_name": "ii m7 (relative)",
+      "numeral": "ii",
+      "intervals": [1, 3, 5, 7],
+      "root": null
+    },
+    "G7"
+  ]
+}

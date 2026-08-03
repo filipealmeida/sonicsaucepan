@@ -25,6 +25,8 @@ rustyline = "14"
 
 # audio/runtime
 cpal = "0.15"
+hound = "3.5"
+midir = "0.10"
 
 # wasm bridge
 wasm-bindgen = "0.2"
