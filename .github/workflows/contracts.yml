@@ -1,0 +1,23 @@
+name: Contract Fixtures
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  contract-fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check contract fixtures
+        run: bash scripts/check_contract_fixtures.sh

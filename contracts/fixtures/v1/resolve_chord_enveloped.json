@@ -1,0 +1,11 @@
+{
+  "api_version": "1.0.0",
+  "payload": {
+    "resolved": {
+      "full_name": "m7",
+      "source": "Relative",
+      "midi_notes": [62, 66, 69, 73],
+      "pitch_classes": ["D", "FS", "A", "CS"]
+    }
+  }
+}

@@ -9,9 +9,14 @@ authors.workspace = true
 name = "ss_cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "generate_contract_fixtures"
+path = "src/bin/generate_contract_fixtures.rs"
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 ss_core.workspace = true
 ss_audio.workspace = true
