@@ -37,7 +37,25 @@ type AppState = {
   selectedChordIndex: number;
   chordFanVisible: boolean;
   graph: LoopGraph;
+  settings: AppSettings;
   status: string;
+};
+
+type WaveformOption = "sine" | "square" | "sawtooth" | "triangle";
+
+type MidiPortOption = {
+  id: string;
+  name: string;
+};
+
+type AppSettings = {
+  showPanel: boolean;
+  centralTone: string;
+  waveform: WaveformOption;
+  midiEnabled: boolean;
+  midiPortId: string;
+  midiChannel: number;
+  midiPorts: MidiPortOption[];
 };
 
 type StageLayout = {
@@ -83,9 +101,49 @@ type SceneGeometry = {
 };
 
 const STORAGE_KEY = "sonic-saucepan-session-graph-v1";
+const SETTINGS_STORAGE_KEY = "sonic-saucepan-settings-v1";
 const MAX_SEGMENTS = 16;
 const CATALOG = catalogJson as ChordCatalog;
 const NODE_MANIPULATION_ENABLED = false;
+const CENTRAL_TONES = [
+  "A",
+  "A#",
+  "Bb",
+  "B",
+  "B#",
+  "Cb",
+  "C",
+  "C#",
+  "Db",
+  "D",
+  "D#",
+  "Eb",
+  "E",
+  "E#",
+  "Fb",
+  "F",
+  "F#",
+  "Gb",
+  "G",
+  "G#",
+  "Ab",
+] as const;
+const WAVEFORMS: WaveformOption[] = ["sine", "triangle", "sawtooth", "square"];
+
+type MidiOutputLike = {
+  id: string;
+  name?: string;
+  send: (data: number[]) => void;
+};
+
+type MidiAccessLike = {
+  outputs?: {
+    forEach?: (callback: (value: MidiOutputLike) => void) => void;
+    [Symbol.iterator]?: () => Iterator<[string, MidiOutputLike]>;
+    values?: () => Iterator<MidiOutputLike>;
+  };
+  onstatechange: ((event: Event) => void) | null;
+};
 
 const root = document.getElementById("app");
 if (!root) {
@@ -311,6 +369,10 @@ function chordLabel(value: string): string {
   return compact.length > 6 ? compact.slice(0, 6) : compact;
 }
 
+function escapeAttr(value: string): string {
+  return escapeHtml(value).replace(/`/g, "&#96;");
+}
+
 function initialChordName(catalog: ChordCatalog): string {
   return catalog.families[0]?.chords[0]?.full_name ?? "Cmaj7add9";
 }
@@ -359,6 +421,65 @@ function loadSavedGraph(): LoopGraph | null {
 function saveGraph(graph: LoopGraph): void {
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(graph));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function defaultSettings(): AppSettings {
+  return {
+    showPanel: false,
+    centralTone: "C",
+    waveform: "triangle",
+    midiEnabled: false,
+    midiPortId: "",
+    midiChannel: 1,
+    midiPorts: [],
+  };
+}
+
+function normalizeWaveform(value: unknown): WaveformOption {
+  return WAVEFORMS.includes(value as WaveformOption) ? (value as WaveformOption) : "triangle";
+}
+
+function normalizeCentralTone(value: unknown): string {
+  const tone = `${value ?? ""}`.trim();
+  return CENTRAL_TONES.includes(tone as (typeof CENTRAL_TONES)[number]) ? tone : "C";
+}
+
+function loadSettings(): AppSettings {
+  const defaults = defaultSettings();
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      return defaults;
+    }
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return {
+      ...defaults,
+      centralTone: normalizeCentralTone(parsed.centralTone),
+      waveform: normalizeWaveform(parsed.waveform),
+      midiEnabled: Boolean(parsed.midiEnabled),
+      midiPortId: typeof parsed.midiPortId === "string" ? parsed.midiPortId : "",
+      midiChannel: clamp(Number(parsed.midiChannel) || 1, 1, 16),
+      midiPorts: [],
+      showPanel: false,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+function saveSettings(settings: AppSettings): void {
+  try {
+    const persisted = {
+      centralTone: settings.centralTone,
+      waveform: settings.waveform,
+      midiEnabled: settings.midiEnabled,
+      midiPortId: settings.midiPortId,
+      midiChannel: settings.midiChannel,
+    };
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(persisted));
   } catch {
     // ignore storage errors
   }
@@ -460,6 +581,8 @@ function midiToFrequency(midi: number): number {
 }
 
 let audioContextRef: AudioContext | null = null;
+let midiAccessRef: MidiAccessLike | null = null;
+let midiStateListenerBound = false;
 
 function getAudioContext(): AudioContext {
   if (audioContextRef) {
@@ -475,7 +598,54 @@ function getAudioContext(): AudioContext {
   return audioContextRef;
 }
 
+function sendMidiPreview(chord: ChordEntry): void {
+  const state = store.getState();
+  const settings = state.settings;
+  if (!settings.midiEnabled || !settings.midiPortId) {
+    return;
+  }
+
+  const outputs = midiAccessRef?.outputs;
+  if (!outputs?.values) {
+    return;
+  }
+
+  let selectedOutput: MidiOutputLike | null = null;
+  for (const output of outputs.values()) {
+    if (output.id === settings.midiPortId) {
+      selectedOutput = output;
+      break;
+    }
+  }
+
+  if (!selectedOutput) {
+    return;
+  }
+
+  const midiNotes = chordToMidi(chord).map((note) => clamp(note, 0, 127));
+  const channel = clamp(settings.midiChannel, 1, 16) - 1;
+  const noteOn = 0x90 + channel;
+  const noteOff = 0x80 + channel;
+
+  midiNotes.forEach((note) => {
+    selectedOutput?.send([noteOn, note, 96]);
+  });
+
+  window.setTimeout(() => {
+    midiNotes.forEach((note) => {
+      selectedOutput?.send([noteOff, note, 0]);
+    });
+  }, 920);
+}
+
 function playChordPreview(chord: ChordEntry): void {
+  triggerCenterPulse();
+
+  const state = store.getState();
+  const waveform = state.settings.waveform;
+
+  sendMidiPreview(chord);
+
   let context: AudioContext;
   try {
     context = getAudioContext();
@@ -498,7 +668,7 @@ function playChordPreview(chord: ChordEntry): void {
   frequencies.forEach((frequency, index) => {
     const oscillator = context.createOscillator();
     const voiceGain = context.createGain();
-    oscillator.type = index === 0 ? "triangle" : "sine";
+    oscillator.type = waveform;
     oscillator.frequency.setValueAtTime(frequency, now);
     oscillator.detune.setValueAtTime((index - 1) * 4, now);
     voiceGain.gain.setValueAtTime(0.0001, now);
@@ -509,6 +679,83 @@ function playChordPreview(chord: ChordEntry): void {
     oscillator.start(now + index * 0.01);
     oscillator.stop(now + 1.15 + index * 0.02);
   });
+}
+
+async function ensureMidiAccess(): Promise<MidiAccessLike | null> {
+  if (midiAccessRef) {
+    return midiAccessRef;
+  }
+
+  const nav = navigator as Navigator & {
+    requestMIDIAccess?: () => Promise<MidiAccessLike>;
+  };
+  if (!nav.requestMIDIAccess) {
+    return null;
+  }
+
+  try {
+    midiAccessRef = await nav.requestMIDIAccess();
+    return midiAccessRef;
+  } catch {
+    return null;
+  }
+}
+
+async function refreshMidiPorts(): Promise<void> {
+  const access = await ensureMidiAccess();
+  if (!access) {
+    const state = store.getState();
+    const settings = {
+      ...state.settings,
+      midiPorts: [],
+      midiPortId: "",
+    };
+    saveSettings(settings);
+    store.setState({
+      ...state,
+      settings,
+      status: "Web MIDI is unavailable in this browser",
+    });
+    return;
+  }
+
+  const ports: MidiPortOption[] = [];
+  const outputs = access.outputs;
+  if (outputs?.forEach) {
+    outputs.forEach((output) => {
+      ports.push({ id: output.id, name: output.name ?? `MIDI ${output.id}` });
+    });
+  } else if (outputs?.values) {
+    for (const output of outputs.values()) {
+      ports.push({ id: output.id, name: output.name ?? `MIDI ${output.id}` });
+    }
+  } else if (outputs?.[Symbol.iterator]) {
+    for (const [, output] of outputs) {
+      ports.push({ id: output.id, name: output.name ?? `MIDI ${output.id}` });
+    }
+  }
+
+  const state = store.getState();
+  const hasSelected = ports.some((port) => port.id === state.settings.midiPortId);
+  const settings = {
+    ...state.settings,
+    midiPorts: ports,
+    midiPortId: hasSelected
+      ? state.settings.midiPortId
+      : (ports[0]?.id ?? ""),
+  };
+  saveSettings(settings);
+  store.setState({
+    ...state,
+    settings,
+  });
+
+  if (!midiStateListenerBound) {
+    access.onstatechange = () => {
+      void refreshMidiPorts();
+    };
+    midiStateListenerBound = true;
+  }
 }
 
 const savedGraph = null;
@@ -526,8 +773,23 @@ const store = createStore<AppState>(() => ({
   selectedChordIndex: initialSelection?.chordIndex ?? 0,
   chordFanVisible: false,
   graph: startingGraph,
+  settings: loadSettings(),
   status: "Initial state ready",
 }));
+
+function updateSettings(patch: Partial<AppSettings>, status?: string): void {
+  const state = store.getState();
+  const settings = {
+    ...state.settings,
+    ...patch,
+  };
+  saveSettings(settings);
+  store.setState({
+    ...state,
+    settings,
+    status: status ?? state.status,
+  });
+}
 
 function getSelectedChord(state: AppState): ChordEntry {
   const family = state.catalog.families[state.selectedFamilyIndex];
@@ -1068,6 +1330,59 @@ function overlay(rootEl: HTMLElement, state: AppState, layout: StageLayout, geom
         ${overlayContent}
       </div>
       <div class="status">${status}</div>
+      ${buildSettingsPanel(state)}
+    </div>
+  `;
+}
+
+function buildSettingsPanel(state: AppState): string {
+  const settings = state.settings;
+  const toneOptions = CENTRAL_TONES
+    .map((tone) => `<option value="${escapeAttr(tone)}" ${tone === settings.centralTone ? "selected" : ""}>${escapeHtml(tone)}</option>`)
+    .join("");
+  const waveformOptions = WAVEFORMS
+    .map((wave) => `<option value="${wave}" ${wave === settings.waveform ? "selected" : ""}>${escapeHtml(wave[0].toUpperCase() + wave.slice(1))}</option>`)
+    .join("");
+  const channelOptions = Array.from({ length: 16 }, (_, index) => index + 1)
+    .map((channel) => `<option value="${channel}" ${channel === settings.midiChannel ? "selected" : ""}>${channel}</option>`)
+    .join("");
+  const midiPortOptions = settings.midiPorts.length > 0
+    ? settings.midiPorts
+      .map((port) => `<option value="${escapeAttr(port.id)}" ${port.id === settings.midiPortId ? "selected" : ""}>${escapeHtml(port.name)}</option>`)
+      .join("")
+    : `<option value="">No MIDI outputs found</option>`;
+
+  return `
+    <div class="settings-modal ${settings.showPanel ? "open" : ""}" aria-hidden="${settings.showPanel ? "false" : "true"}">
+      <button class="settings-backdrop" data-settings-action="close" aria-label="Close settings"></button>
+      <section class="settings-panel" role="dialog" aria-modal="true" aria-label="Settings">
+        <header class="settings-header">
+          <h2>Settings</h2>
+          <button class="settings-close" data-settings-action="close" aria-label="Close settings">×</button>
+        </header>
+        <div class="settings-fields">
+          <label class="settings-field">
+            <span>Central Tone</span>
+            <select data-setting="central-tone">${toneOptions}</select>
+          </label>
+          <label class="settings-field">
+            <span>Waveform</span>
+            <select data-setting="waveform">${waveformOptions}</select>
+          </label>
+          <label class="settings-field inline">
+            <span>MIDI</span>
+            <input type="checkbox" data-setting="midi-enabled" ${settings.midiEnabled ? "checked" : ""} />
+          </label>
+          <label class="settings-field">
+            <span>MIDI Port</span>
+            <select data-setting="midi-port" ${settings.midiEnabled ? "" : "disabled"}>${midiPortOptions}</select>
+          </label>
+          <label class="settings-field">
+            <span>MIDI Channel</span>
+            <select data-setting="midi-channel" ${settings.midiEnabled ? "" : "disabled"}>${channelOptions}</select>
+          </label>
+        </div>
+      </section>
     </div>
   `;
 }
@@ -1139,6 +1454,9 @@ let performCursorNodeId: number | null = null;
 const nodeOffsets: Record<number, { x: number; y: number }> = {};
 
 const PERFORM_STEP_MS = 760;
+const CENTER_PULSE_MS = 620;
+let centerPulseStartMs = 0;
+let centerPulseRafId = 0;
 
 function stopPerformLoop(): void {
   if (performTimerId !== null) {
@@ -1146,6 +1464,42 @@ function stopPerformLoop(): void {
     performTimerId = null;
   }
   performPlaying = false;
+}
+
+function pulseStrengthAt(nowMs: number): number {
+  if (centerPulseStartMs <= 0) {
+    return 0;
+  }
+  const elapsed = nowMs - centerPulseStartMs;
+  if (elapsed < 0 || elapsed > CENTER_PULSE_MS) {
+    return 0;
+  }
+  const t = clamp(elapsed / CENTER_PULSE_MS, 0, 1);
+  return Math.sin(t * Math.PI) * (1 - t * 0.25);
+}
+
+function schedulePulseRedraw(): void {
+  if (centerPulseRafId !== 0) {
+    return;
+  }
+
+  centerPulseRafId = window.requestAnimationFrame(function tick(nowMs) {
+    centerPulseRafId = 0;
+    const canvas = root.querySelector<HTMLCanvasElement>(".webgl-stage");
+    if (!canvas) {
+      return;
+    }
+
+    redrawCanvasOnly(canvas, false);
+    if (pulseStrengthAt(nowMs) > 0) {
+      schedulePulseRedraw();
+    }
+  });
+}
+
+function triggerCenterPulse(): void {
+  centerPulseStartMs = performance.now();
+  schedulePulseRedraw();
 }
 
 function syncSelectionToNode(nodeId: number, status: string): void {
@@ -1169,12 +1523,18 @@ function syncSelectionToNode(nodeId: number, status: string): void {
   }
 
   saveGraph(updatedGraph);
+  const keepCatalogSelection = performPlaying;
   store.setState({
     ...state,
     graph: updatedGraph,
-    selectedFamilyIndex: match?.familyIndex ?? state.selectedFamilyIndex,
-    selectedChordIndex: match?.chordIndex ?? state.selectedChordIndex,
-    chordFanVisible: true,
+    selectedFamilyIndex: keepCatalogSelection
+      ? state.selectedFamilyIndex
+      : (match?.familyIndex ?? state.selectedFamilyIndex),
+    selectedChordIndex: keepCatalogSelection
+      ? state.selectedChordIndex
+      : (match?.chordIndex ?? state.selectedChordIndex),
+    // During perform playback, do not auto-expand/switch family fan.
+    chordFanVisible: keepCatalogSelection ? state.chordFanVisible : true,
     status,
   });
 }
@@ -1439,6 +1799,18 @@ function drawFallback2d(
   ctx.strokeStyle = "rgba(104, 169, 255, 0.9)";
   ctx.lineWidth = 3;
   ctx.stroke();
+
+  const pulseStrength = pulseStrengthAt(performance.now());
+  if (pulseStrength > 0.001) {
+    ctx.beginPath();
+    ctx.arc(layout.centerX, layout.centerY, layout.centerRadius + pulseStrength * 4, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(126, 231, 255, ${0.22 + pulseStrength * 0.7})`;
+    ctx.lineWidth = 3 + pulseStrength * 8;
+    ctx.shadowColor = "rgba(128, 238, 255, 0.95)";
+    ctx.shadowBlur = 8 + pulseStrength * 26;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
 
   if (NODE_MANIPULATION_ENABLED) {
     ctx.beginPath();
@@ -1726,11 +2098,8 @@ function bindCornerControls(shell: HTMLElement): void {
   const performBtn = shell.querySelector<HTMLButtonElement>(".corner-btn[data-action='perform']");
 
   settingsBtn?.addEventListener("click", () => {
-    const state = store.getState();
-    store.setState({
-      ...state,
-      status: "Settings panel placeholder: coming next",
-    });
+    updateSettings({ showPanel: true }, "Settings opened");
+    void refreshMidiPorts();
   });
 
   savedLoopsBtn?.addEventListener("click", () => {
@@ -1742,12 +2111,6 @@ function bindCornerControls(shell: HTMLElement): void {
   });
 
   if (!performBtn) {
-    return;
-  }
-
-  if (!NODE_MANIPULATION_ENABLED) {
-    performBtn.disabled = true;
-    performBtn.title = "Perform disabled in single-state mode";
     return;
   }
 
@@ -1792,6 +2155,60 @@ function bindCornerControls(shell: HTMLElement): void {
     }
 
     startPerformLoop();
+  });
+}
+
+function bindSettingsPanel(shell: HTMLElement): void {
+  shell.querySelectorAll<HTMLElement>("[data-settings-action='close']").forEach((element) => {
+    element.addEventListener("click", () => {
+      updateSettings({ showPanel: false }, "Settings closed");
+    });
+  });
+
+  const toneSelect = shell.querySelector<HTMLSelectElement>("select[data-setting='central-tone']");
+  toneSelect?.addEventListener("change", () => {
+    updateSettings({ centralTone: normalizeCentralTone(toneSelect.value) }, `Central tone set to ${toneSelect.value}`);
+  });
+
+  const waveformSelect = shell.querySelector<HTMLSelectElement>("select[data-setting='waveform']");
+  waveformSelect?.addEventListener("change", () => {
+    const waveform = normalizeWaveform(waveformSelect.value);
+    updateSettings({ waveform }, `Waveform set to ${waveform}`);
+  });
+
+  const midiEnabledToggle = shell.querySelector<HTMLInputElement>("input[data-setting='midi-enabled']");
+  midiEnabledToggle?.addEventListener("change", async () => {
+    const enabled = midiEnabledToggle.checked;
+    if (!enabled) {
+      updateSettings({ midiEnabled: false }, "MIDI disabled");
+      return;
+    }
+
+    await refreshMidiPorts();
+    const access = await ensureMidiAccess();
+    if (!access) {
+      updateSettings({ midiEnabled: false }, "Web MIDI unavailable");
+      return;
+    }
+
+    const latest = store.getState();
+    if (latest.settings.midiPorts.length === 0) {
+      updateSettings({ midiEnabled: false }, "No MIDI output ports found");
+      return;
+    }
+
+    updateSettings({ midiEnabled: true }, "MIDI enabled");
+  });
+
+  const midiPortSelect = shell.querySelector<HTMLSelectElement>("select[data-setting='midi-port']");
+  midiPortSelect?.addEventListener("change", () => {
+    updateSettings({ midiPortId: midiPortSelect.value }, "MIDI port updated");
+  });
+
+  const midiChannelSelect = shell.querySelector<HTMLSelectElement>("select[data-setting='midi-channel']");
+  midiChannelSelect?.addEventListener("change", () => {
+    const channel = clamp(Number(midiChannelSelect.value) || 1, 1, 16);
+    updateSettings({ midiChannel: channel }, `MIDI channel set to ${channel}`);
   });
 }
 
@@ -1968,6 +2385,7 @@ function mountStage(): void {
   const geometry = buildSceneGeometry(state, layout);
   hitZones = buildHitZones(layout, geometry, state);
   bindCornerControls(shell);
+  bindSettingsPanel(shell);
   bindCanvasInteractions(canvas);
 
   if (FORCE_CANVAS_RENDERER) {
@@ -2035,6 +2453,10 @@ if (!FORCE_CANVAS_RENDERER) {
 
 window.addEventListener("beforeunload", () => {
   stopPerformLoop();
+  if (centerPulseRafId) {
+    window.cancelAnimationFrame(centerPulseRafId);
+    centerPulseRafId = 0;
+  }
   if (rafId) {
     window.cancelAnimationFrame(rafId);
   }
