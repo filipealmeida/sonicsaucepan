@@ -1,0 +1,44 @@
+{
+  "families": [
+    {
+      "name": "Major Scale (Relative)",
+      "chords": [
+        {
+          "numeral": "I",
+          "full_name": "maj7add9",
+          "intervals": [1, 3, 5, 7, 9],
+          "root": null
+        },
+        {
+          "numeral": "ii",
+          "full_name": "m7",
+          "intervals": [1, 3, 5, 7],
+          "root": null
+        }
+      ]
+    },
+    {
+      "name": "Fixed Chords",
+      "chords": [
+        {
+          "full_name": "Dmaj7add9",
+          "root": "D",
+          "intervals": [1, 3, 5, 7, 9]
+        }
+      ]
+    },
+    {
+      "name": "Explicit MIDI",
+      "chords": [
+        {
+          "full_name": "CustomVoicing",
+          "midi_notes": [60, 64, 67, 74]
+        }
+      ]
+    },
+    {
+      "name": "User Defined",
+      "chords": []
+    }
+  ]
+}

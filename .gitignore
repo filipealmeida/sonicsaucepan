@@ -1,0 +1,52 @@
+# ---- Rust / Cargo ----
+/target/
+**/*.rs.bk
+
+# ---- WebAssembly build outputs ----
+/pkg/
+crates/ss_wasm/pkg/
+wasm-pack.log
+
+# ---- TypeScript / Node.js ----
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+.yarn-cache/
+.yarnrc.yml
+
+# Build artifacts
+/dist/
+/build/
+/out/
+/.cache/
+/.parcel-cache/
+/.turbo/
+.next/
+.vite/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Environment files ----
+.env
+.env.*
+!.env.example
+
+# ---- Editor / OS ----
+.DS_Store
+Thumbs.db
+.idea/
+
+# Keep shared VS Code settings if you want to commit team config.
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
