@@ -324,7 +324,12 @@
     },
     {
       "name": "User Defined",
-      "chords": []
+      "chords": [
+        {
+          "full_name": "C",
+          "intervals": [1, 3, 5]
+        }
+      ]
     }
   ]
 }

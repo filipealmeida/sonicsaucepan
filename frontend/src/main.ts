@@ -38,10 +38,16 @@ type AppState = {
   chordFanVisible: boolean;
   graph: LoopGraph;
   settings: AppSettings;
+  savedLoopDraft: string;
+  savedLoopSelectedIndex: number;
   status: string;
 };
 
 type WaveformOption = "sine" | "square" | "sawtooth" | "triangle";
+
+type TimeSignatureOption = "4/4" | "3/4" | "6/8";
+
+type EffectOption = "none" | "delay" | "chorus";
 
 type MidiPortOption = {
   id: string;
@@ -50,8 +56,14 @@ type MidiPortOption = {
 
 type AppSettings = {
   showPanel: boolean;
+  showPerformPanel: boolean;
+  showSavedLoopsPanel: boolean;
   centralTone: string;
+  bpm: number;
+  timeSignature: TimeSignatureOption;
+  swing: number;
   waveform: WaveformOption;
+  effects: EffectOption;
   midiEnabled: boolean;
   midiPortId: string;
   midiChannel: number;
@@ -129,6 +141,15 @@ const CENTRAL_TONES = [
   "Ab",
 ] as const;
 const WAVEFORMS: WaveformOption[] = ["sine", "triangle", "sawtooth", "square"];
+const TIME_SIGNATURES: TimeSignatureOption[] = ["4/4", "3/4", "6/8"];
+const EFFECT_OPTIONS: EffectOption[] = ["none", "delay", "chorus"];
+const DUMMY_SAVED_PROGRESSIONS = [
+  "Neon Cadence",
+  "Glass Harbor",
+  "Sunline Lift",
+  "Midnight Pivot",
+  "Amber Return",
+] as const;
 
 type MidiOutputLike = {
   id: string;
@@ -316,34 +337,11 @@ function segmentMidpoint(layout: StageLayout, segment: Segment): { x: number; y:
 }
 
 function shorthand(name: string): string {
-  const upper = name.toUpperCase();
-  if (upper.includes("DIATONIC")) {
-    return "MINOR";
-  }
-  if (upper.includes("SECONDARY")) {
-    return "DOMINANT";
-  }
-  if (upper.includes("MODAL")) {
-    return "MODES";
-  }
-  if (upper.includes("USER")) {
-    return "USER";
-  }
-  const first = name.split(/\s+/)[0] ?? "FAMILY";
-  return first.toUpperCase();
+  const trimmed = name.trim();
+  return trimmed.length > 0 ? trimmed : "Family";
 }
 
 function bandLabel(name: string): string {
-  const upper = name.toUpperCase();
-  if (upper.includes("DIATONIC") || upper.includes("MAJOR")) {
-    return "MAJOR";
-  }
-  if (upper.includes("MODAL")) {
-    return "MODES";
-  }
-  if (upper.includes("SECONDARY") || upper.includes("DOMINANT")) {
-    return "DOMINANT";
-  }
   return shorthand(name);
 }
 
@@ -365,8 +363,8 @@ function escapeHtml(value: string): string {
 }
 
 function chordLabel(value: string): string {
-  const compact = value.replace(/\s+/g, "").toUpperCase();
-  return compact.length > 6 ? compact.slice(0, 6) : compact;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : "I";
 }
 
 function escapeAttr(value: string): string {
@@ -429,8 +427,14 @@ function saveGraph(graph: LoopGraph): void {
 function defaultSettings(): AppSettings {
   return {
     showPanel: false,
+    showPerformPanel: false,
+    showSavedLoopsPanel: false,
     centralTone: "C",
+    bpm: 96,
+    timeSignature: "4/4",
+    swing: 0,
     waveform: "triangle",
+    effects: "none",
     midiEnabled: false,
     midiPortId: "",
     midiChannel: 1,
@@ -440,6 +444,22 @@ function defaultSettings(): AppSettings {
 
 function normalizeWaveform(value: unknown): WaveformOption {
   return WAVEFORMS.includes(value as WaveformOption) ? (value as WaveformOption) : "triangle";
+}
+
+function normalizeTimeSignature(value: unknown): TimeSignatureOption {
+  return TIME_SIGNATURES.includes(value as TimeSignatureOption) ? (value as TimeSignatureOption) : "4/4";
+}
+
+function normalizeEffects(value: unknown): EffectOption {
+  return EFFECT_OPTIONS.includes(value as EffectOption) ? (value as EffectOption) : "none";
+}
+
+function normalizeBpm(value: unknown): number {
+  return clamp(Number(value) || 96, 40, 240);
+}
+
+function normalizeSwing(value: unknown): number {
+  return clamp(Number(value) || 0, 0, 75);
 }
 
 function normalizeCentralTone(value: unknown): string {
@@ -458,12 +478,18 @@ function loadSettings(): AppSettings {
     return {
       ...defaults,
       centralTone: normalizeCentralTone(parsed.centralTone),
+      bpm: normalizeBpm(parsed.bpm),
+      timeSignature: normalizeTimeSignature(parsed.timeSignature),
+      swing: normalizeSwing(parsed.swing),
       waveform: normalizeWaveform(parsed.waveform),
+      effects: normalizeEffects(parsed.effects),
       midiEnabled: Boolean(parsed.midiEnabled),
       midiPortId: typeof parsed.midiPortId === "string" ? parsed.midiPortId : "",
       midiChannel: clamp(Number(parsed.midiChannel) || 1, 1, 16),
       midiPorts: [],
       showPanel: false,
+      showPerformPanel: false,
+      showSavedLoopsPanel: false,
     };
   } catch {
     return defaults;
@@ -474,7 +500,11 @@ function saveSettings(settings: AppSettings): void {
   try {
     const persisted = {
       centralTone: settings.centralTone,
+      bpm: settings.bpm,
+      timeSignature: settings.timeSignature,
+      swing: settings.swing,
       waveform: settings.waveform,
+      effects: settings.effects,
       midiEnabled: settings.midiEnabled,
       midiPortId: settings.midiPortId,
       midiChannel: settings.midiChannel,
@@ -643,6 +673,7 @@ function playChordPreview(chord: ChordEntry): void {
 
   const state = store.getState();
   const waveform = state.settings.waveform;
+  const effects = state.settings.effects;
 
   sendMidiPreview(chord);
 
@@ -660,17 +691,37 @@ function playChordPreview(chord: ChordEntry): void {
   const frequencies = chordToMidi(chord).map(midiToFrequency);
   const now = context.currentTime;
   const master = context.createGain();
-  master.connect(context.destination);
+  const dryOutput = context.createGain();
+  dryOutput.gain.setValueAtTime(1, now);
+  master.connect(dryOutput);
+  dryOutput.connect(context.destination);
+
+  if (effects === "delay") {
+    const delay = context.createDelay();
+    const feedback = context.createGain();
+    const wet = context.createGain();
+    delay.delayTime.setValueAtTime(0.22, now);
+    feedback.gain.setValueAtTime(0.32, now);
+    wet.gain.setValueAtTime(0.24, now);
+    master.connect(delay);
+    delay.connect(feedback);
+    feedback.connect(delay);
+    delay.connect(wet);
+    wet.connect(context.destination);
+  }
+
   master.gain.setValueAtTime(0, now);
   master.gain.linearRampToValueAtTime(0.18, now + 0.03);
   master.gain.exponentialRampToValueAtTime(0.001, now + 1.1);
+
+  const detuneSpread = effects === "chorus" ? 11 : 4;
 
   frequencies.forEach((frequency, index) => {
     const oscillator = context.createOscillator();
     const voiceGain = context.createGain();
     oscillator.type = waveform;
     oscillator.frequency.setValueAtTime(frequency, now);
-    oscillator.detune.setValueAtTime((index - 1) * 4, now);
+    oscillator.detune.setValueAtTime((index - 1) * detuneSpread, now);
     voiceGain.gain.setValueAtTime(0.0001, now);
     voiceGain.gain.linearRampToValueAtTime(0.28 / Math.max(1, frequencies.length), now + 0.02 + index * 0.01);
     voiceGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.95 + index * 0.02);
@@ -774,6 +825,8 @@ const store = createStore<AppState>(() => ({
   chordFanVisible: false,
   graph: startingGraph,
   settings: loadSettings(),
+  savedLoopDraft: "",
+  savedLoopSelectedIndex: 0,
   status: "Initial state ready",
 }));
 
@@ -1331,6 +1384,8 @@ function overlay(rootEl: HTMLElement, state: AppState, layout: StageLayout, geom
       </div>
       <div class="status">${status}</div>
       ${buildSettingsPanel(state)}
+      ${buildPerformPanel(state)}
+      ${buildSavedLoopsPanel(state)}
     </div>
   `;
 }
@@ -1339,9 +1394,6 @@ function buildSettingsPanel(state: AppState): string {
   const settings = state.settings;
   const toneOptions = CENTRAL_TONES
     .map((tone) => `<option value="${escapeAttr(tone)}" ${tone === settings.centralTone ? "selected" : ""}>${escapeHtml(tone)}</option>`)
-    .join("");
-  const waveformOptions = WAVEFORMS
-    .map((wave) => `<option value="${wave}" ${wave === settings.waveform ? "selected" : ""}>${escapeHtml(wave[0].toUpperCase() + wave.slice(1))}</option>`)
     .join("");
   const channelOptions = Array.from({ length: 16 }, (_, index) => index + 1)
     .map((channel) => `<option value="${channel}" ${channel === settings.midiChannel ? "selected" : ""}>${channel}</option>`)
@@ -1365,10 +1417,6 @@ function buildSettingsPanel(state: AppState): string {
             <span>Central Tone</span>
             <select data-setting="central-tone">${toneOptions}</select>
           </label>
-          <label class="settings-field">
-            <span>Waveform</span>
-            <select data-setting="waveform">${waveformOptions}</select>
-          </label>
           <label class="settings-field inline">
             <span>MIDI</span>
             <input type="checkbox" data-setting="midi-enabled" ${settings.midiEnabled ? "checked" : ""} />
@@ -1387,6 +1435,100 @@ function buildSettingsPanel(state: AppState): string {
   `;
 }
 
+function buildPerformPanel(state: AppState): string {
+  const settings = state.settings;
+  const toneOptions = CENTRAL_TONES
+    .map((tone) => `<option value="${escapeAttr(tone)}" ${tone === settings.centralTone ? "selected" : ""}>${escapeHtml(tone)}</option>`)
+    .join("");
+  const waveformOptions = WAVEFORMS
+    .map((wave) => `<option value="${wave}" ${wave === settings.waveform ? "selected" : ""}>${escapeHtml(wave[0].toUpperCase() + wave.slice(1))}</option>`)
+    .join("");
+  const timeSignatureOptions = TIME_SIGNATURES
+    .map((signature) => `<option value="${signature}" ${signature === settings.timeSignature ? "selected" : ""}>${escapeHtml(signature)}</option>`)
+    .join("");
+  const effectsOptions = EFFECT_OPTIONS
+    .map((effect) => `<option value="${effect}" ${effect === settings.effects ? "selected" : ""}>${escapeHtml(effect[0].toUpperCase() + effect.slice(1))}</option>`)
+    .join("");
+
+  return `
+    <div class="settings-modal perform-modal ${settings.showPerformPanel ? "open" : ""}" aria-hidden="${settings.showPerformPanel ? "false" : "true"}">
+      <button class="settings-backdrop" data-perform-action="close" aria-label="Close perform options"></button>
+      <section class="settings-panel" role="dialog" aria-modal="true" aria-label="Perform options">
+        <header class="settings-header">
+          <h2>Perform Options</h2>
+          <button class="settings-close" data-perform-action="close" aria-label="Close perform options">×</button>
+        </header>
+        <div class="settings-fields">
+          <label class="settings-field">
+            <span>Central Tone</span>
+            <select data-perform-setting="central-tone">${toneOptions}</select>
+          </label>
+          <label class="settings-field">
+            <span>BPM</span>
+            <input type="number" min="40" max="240" step="1" value="${settings.bpm}" data-perform-setting="bpm" />
+          </label>
+          <label class="settings-field">
+            <span>Time Signature</span>
+            <select data-perform-setting="time-signature">${timeSignatureOptions}</select>
+          </label>
+          <label class="settings-field">
+            <span>Swing (${settings.swing}%)</span>
+            <input type="range" min="0" max="75" step="1" value="${settings.swing}" data-perform-setting="swing" />
+          </label>
+          <label class="settings-field">
+            <span>Waveform</span>
+            <select data-perform-setting="waveform">${waveformOptions}</select>
+          </label>
+          <label class="settings-field">
+            <span>Effects</span>
+            <select data-perform-setting="effects">${effectsOptions}</select>
+          </label>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function buildSavedLoopsPanel(state: AppState): string {
+  const settings = state.settings;
+  const rows = DUMMY_SAVED_PROGRESSIONS
+    .map((name, index) => {
+      const selected = index === state.savedLoopSelectedIndex;
+      return `
+        <li>
+          <button class="saved-loop-item ${selected ? "active" : ""}" data-saved-loop-index="${index}" type="button" aria-pressed="${selected ? "true" : "false"}">
+            <span class="saved-loop-position">${index + 1}</span>
+            <span class="saved-loop-name">${escapeHtml(name)}</span>
+          </button>
+        </li>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="settings-modal saved-loops-modal ${settings.showSavedLoopsPanel ? "open" : ""}" aria-hidden="${settings.showSavedLoopsPanel ? "false" : "true"}">
+      <button class="settings-backdrop" data-saved-loops-action="close" aria-label="Close saved loops"></button>
+      <section class="settings-panel" role="dialog" aria-modal="true" aria-label="Saved loops">
+        <header class="settings-header">
+          <h2>Saved Loops</h2>
+          <button class="settings-close" data-saved-loops-action="close" aria-label="Close saved loops">×</button>
+        </header>
+        <div class="settings-fields">
+          <label class="settings-field">
+            <span>Loop Name</span>
+            <input type="text" value="${escapeAttr(state.savedLoopDraft)}" placeholder="Type loop name" data-saved-loop-input="name" />
+          </label>
+          <div class="saved-loop-list-wrap">
+            <span class="saved-loop-label">Saved Progressions</span>
+            <ol class="saved-loop-list">${rows}</ol>
+          </div>
+          <div class="saved-loop-index">Index ${state.savedLoopSelectedIndex + 1} / ${DUMMY_SAVED_PROGRESSIONS.length}</div>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function buildOverlayContent(state: AppState, layout: StageLayout, geometry: SceneGeometry): string {
   const selectedChord = getSelectedChord(state);
   const family = getSelectedChordFamily(state);
@@ -1397,7 +1539,7 @@ function buildOverlayContent(state: AppState, layout: StageLayout, geometry: Sce
       .map((seg, index) => {
         const point = segmentMidpoint(layout, seg);
         const chord = family.chords[index];
-        const label = chordLabel(chord?.numeral ?? chord?.full_name ?? "I");
+        const label = chordLabel(chord?.full_name ?? chord?.numeral ?? "I");
         return `<span class="label chord" style="left:${point.x}px;top:${point.y}px">${escapeHtml(label)}</span>`;
       })
       .join("")
@@ -1451,19 +1593,48 @@ let scenePan = { x: 0, y: 0 };
 let performPlaying = false;
 let performTimerId: number | null = null;
 let performCursorNodeId: number | null = null;
+let performStepCount = 0;
+let modalOpenCount = 0;
+let resumePerformAfterModalClose = false;
 const nodeOffsets: Record<number, { x: number; y: number }> = {};
 
-const PERFORM_STEP_MS = 760;
 const CENTER_PULSE_MS = 620;
 let centerPulseStartMs = 0;
 let centerPulseRafId = 0;
 
 function stopPerformLoop(): void {
   if (performTimerId !== null) {
-    window.clearInterval(performTimerId);
+    window.clearTimeout(performTimerId);
     performTimerId = null;
   }
   performPlaying = false;
+}
+
+function currentPerformStepMs(stepCount: number): number {
+  const { bpm, swing } = store.getState().settings;
+  const beatMs = 60000 / clamp(bpm, 40, 240);
+  if (swing <= 0) {
+    return beatMs;
+  }
+  const swingRatio = clamp(swing / 100, 0, 0.75);
+  const isOddStep = stepCount % 2 === 1;
+  const multiplier = isOddStep ? 1 - swingRatio * 0.5 : 1 + swingRatio * 0.5;
+  return beatMs * multiplier;
+}
+
+function scheduleNextPerformStep(): void {
+  if (!performPlaying) {
+    return;
+  }
+  const delayMs = currentPerformStepMs(performStepCount);
+  performTimerId = window.setTimeout(() => {
+    if (!performPlaying) {
+      return;
+    }
+    performStepCount += 1;
+    performStep();
+    scheduleNextPerformStep();
+  }, delayMs);
 }
 
 function pulseStrengthAt(nowMs: number): number {
@@ -1557,14 +1728,32 @@ function performStep(): void {
   syncSelectionToNode(performCursorNodeId, `Performing ${chordName}`);
 }
 
-function startPerformLoop(): void {
+function startPerformLoop(options?: { resetCursor?: boolean }): void {
+  const resetCursor = options?.resetCursor ?? true;
   stopPerformLoop();
   performPlaying = true;
-  performCursorNodeId = null;
+  performStepCount = 0;
+  if (resetCursor) {
+    performCursorNodeId = null;
+  }
   performStep();
-  performTimerId = window.setInterval(() => {
-    performStep();
-  }, PERFORM_STEP_MS);
+  scheduleNextPerformStep();
+}
+
+function handleModalOpened(): void {
+  if (modalOpenCount === 0 && performPlaying) {
+    resumePerformAfterModalClose = true;
+    stopPerformLoop();
+  }
+  modalOpenCount += 1;
+}
+
+function handleModalClosed(): void {
+  modalOpenCount = Math.max(0, modalOpenCount - 1);
+  if (modalOpenCount === 0 && resumePerformAfterModalClose) {
+    resumePerformAfterModalClose = false;
+    startPerformLoop({ resetCursor: false });
+  }
 }
 
 function buildGraphNodeViews(state: AppState, layout: StageLayout): GraphNodeView[] {
@@ -2098,16 +2287,20 @@ function bindCornerControls(shell: HTMLElement): void {
   const performBtn = shell.querySelector<HTMLButtonElement>(".corner-btn[data-action='perform']");
 
   settingsBtn?.addEventListener("click", () => {
+    const state = store.getState();
+    if (!state.settings.showPanel) {
+      handleModalOpened();
+    }
     updateSettings({ showPanel: true }, "Settings opened");
     void refreshMidiPorts();
   });
 
   savedLoopsBtn?.addEventListener("click", () => {
     const state = store.getState();
-    store.setState({
-      ...state,
-      status: "Saved loops panel placeholder: coming next",
-    });
+    if (!state.settings.showSavedLoopsPanel) {
+      handleModalOpened();
+    }
+    updateSettings({ showSavedLoopsPanel: true }, "Saved loops opened");
   });
 
   if (!performBtn) {
@@ -2122,10 +2315,10 @@ function bindCornerControls(shell: HTMLElement): void {
     longPressTimer = window.setTimeout(() => {
       longPressFired = true;
       const state = store.getState();
-      store.setState({
-        ...state,
-        status: "Perform options placeholder: hold actions coming next",
-      });
+      if (!state.settings.showPerformPanel) {
+        handleModalOpened();
+      }
+      updateSettings({ showPerformPanel: true }, "Perform options opened");
     }, 560);
   });
 
@@ -2154,13 +2347,17 @@ function bindCornerControls(shell: HTMLElement): void {
       return;
     }
 
-    startPerformLoop();
+    startPerformLoop({ resetCursor: true });
   });
 }
 
 function bindSettingsPanel(shell: HTMLElement): void {
   shell.querySelectorAll<HTMLElement>("[data-settings-action='close']").forEach((element) => {
     element.addEventListener("click", () => {
+      const state = store.getState();
+      if (state.settings.showPanel) {
+        handleModalClosed();
+      }
       updateSettings({ showPanel: false }, "Settings closed");
     });
   });
@@ -2168,12 +2365,6 @@ function bindSettingsPanel(shell: HTMLElement): void {
   const toneSelect = shell.querySelector<HTMLSelectElement>("select[data-setting='central-tone']");
   toneSelect?.addEventListener("change", () => {
     updateSettings({ centralTone: normalizeCentralTone(toneSelect.value) }, `Central tone set to ${toneSelect.value}`);
-  });
-
-  const waveformSelect = shell.querySelector<HTMLSelectElement>("select[data-setting='waveform']");
-  waveformSelect?.addEventListener("change", () => {
-    const waveform = normalizeWaveform(waveformSelect.value);
-    updateSettings({ waveform }, `Waveform set to ${waveform}`);
   });
 
   const midiEnabledToggle = shell.querySelector<HTMLInputElement>("input[data-setting='midi-enabled']");
@@ -2209,6 +2400,87 @@ function bindSettingsPanel(shell: HTMLElement): void {
   midiChannelSelect?.addEventListener("change", () => {
     const channel = clamp(Number(midiChannelSelect.value) || 1, 1, 16);
     updateSettings({ midiChannel: channel }, `MIDI channel set to ${channel}`);
+  });
+}
+
+function bindPerformPanel(shell: HTMLElement): void {
+  shell.querySelectorAll<HTMLElement>("[data-perform-action='close']").forEach((element) => {
+    element.addEventListener("click", () => {
+      const state = store.getState();
+      if (state.settings.showPerformPanel) {
+        handleModalClosed();
+      }
+      updateSettings({ showPerformPanel: false }, "Perform options closed");
+    });
+  });
+
+  const bpmInput = shell.querySelector<HTMLInputElement>("input[data-perform-setting='bpm']");
+  bpmInput?.addEventListener("change", () => {
+    const bpm = normalizeBpm(bpmInput.value);
+    updateSettings({ bpm }, `Tempo set to ${bpm} BPM`);
+  });
+
+  const toneSelect = shell.querySelector<HTMLSelectElement>("select[data-perform-setting='central-tone']");
+  toneSelect?.addEventListener("change", () => {
+    updateSettings({ centralTone: normalizeCentralTone(toneSelect.value) }, `Central tone set to ${toneSelect.value}`);
+  });
+
+  const timeSignatureSelect = shell.querySelector<HTMLSelectElement>("select[data-perform-setting='time-signature']");
+  timeSignatureSelect?.addEventListener("change", () => {
+    const timeSignature = normalizeTimeSignature(timeSignatureSelect.value);
+    updateSettings({ timeSignature }, `Time signature set to ${timeSignature}`);
+  });
+
+  const swingInput = shell.querySelector<HTMLInputElement>("input[data-perform-setting='swing']");
+  swingInput?.addEventListener("input", () => {
+    const swing = normalizeSwing(swingInput.value);
+    updateSettings({ swing }, `Swing set to ${swing}%`);
+  });
+
+  const waveformSelect = shell.querySelector<HTMLSelectElement>("select[data-perform-setting='waveform']");
+  waveformSelect?.addEventListener("change", () => {
+    const waveform = normalizeWaveform(waveformSelect.value);
+    updateSettings({ waveform }, `Waveform set to ${waveform}`);
+  });
+
+  const effectsSelect = shell.querySelector<HTMLSelectElement>("select[data-perform-setting='effects']");
+  effectsSelect?.addEventListener("change", () => {
+    const effects = normalizeEffects(effectsSelect.value);
+    updateSettings({ effects }, `Effects set to ${effects}`);
+  });
+}
+
+function bindSavedLoopsPanel(shell: HTMLElement): void {
+  shell.querySelectorAll<HTMLElement>("[data-saved-loops-action='close']").forEach((element) => {
+    element.addEventListener("click", () => {
+      const state = store.getState();
+      if (state.settings.showSavedLoopsPanel) {
+        handleModalClosed();
+      }
+      updateSettings({ showSavedLoopsPanel: false }, "Saved loops closed");
+    });
+  });
+
+  const nameInput = shell.querySelector<HTMLInputElement>("input[data-saved-loop-input='name']");
+  nameInput?.addEventListener("input", () => {
+    const state = store.getState();
+    store.setState({
+      ...state,
+      savedLoopDraft: nameInput.value,
+    });
+  });
+
+  shell.querySelectorAll<HTMLButtonElement>("button[data-saved-loop-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const value = Number(button.dataset.savedLoopIndex ?? 0);
+      const index = clamp(value, 0, DUMMY_SAVED_PROGRESSIONS.length - 1);
+      const state = store.getState();
+      store.setState({
+        ...state,
+        savedLoopSelectedIndex: index,
+        status: `Selected saved progression ${index + 1}`,
+      });
+    });
   });
 }
 
@@ -2386,6 +2658,8 @@ function mountStage(): void {
   hitZones = buildHitZones(layout, geometry, state);
   bindCornerControls(shell);
   bindSettingsPanel(shell);
+  bindPerformPanel(shell);
+  bindSavedLoopsPanel(shell);
   bindCanvasInteractions(canvas);
 
   if (FORCE_CANVAS_RENDERER) {
