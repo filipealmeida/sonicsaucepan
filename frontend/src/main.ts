@@ -1795,7 +1795,7 @@ function buildOverlayContent(state: AppState, layout: StageLayout, geometry: Sce
         const point = segmentMidpoint(layout, seg);
         const chord = family.chords[index];
         const label = chordLabel(chord?.full_name ?? chord?.numeral ?? "I");
-        return `<span class="label chord" style="left:${point.x}px;top:${point.y}px">${escapeHtml(label)}</span>`;
+        return `<span class="label chord" style="left:${point.x}px;top:${point.y}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(label)}</span>`;
       })
       .join("")
     : "";
@@ -1805,15 +1805,15 @@ function buildOverlayContent(state: AppState, layout: StageLayout, geometry: Sce
       const point = segmentMidpoint(layout, seg);
       const familyIndex = geometry.familyIndices[index] ?? 0;
       const label = shorthand(state.catalog.families[familyIndex]?.name ?? "Family");
-      return `<span class="label family" style="left:${point.x}px;top:${point.y}px">${escapeHtml(label)}</span>`;
+      return `<span class="label family" style="left:${point.x}px;top:${point.y}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(label)}</span>`;
     })
     .join("");
 
   return `
     <div class="circuit circuit-left"></div>
     <div class="circuit circuit-right"></div>
-    <span class="label center" style="left:${layout.centerX}px;top:${layout.centerY}px">${escapeHtml(chordLabel(selectedNode?.chordName ?? selectedChord.full_name))}</span>
-    <span class="label major" style="left:${layout.centerX}px;top:${layout.centerY - layout.centerRadius + 24}px">${escapeHtml(bandLabel(family.name))}</span>
+    <span class="label center" style="left:${layout.centerX}px;top:${layout.centerY}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(chordLabel(selectedNode?.chordName ?? selectedChord.full_name))}</span>
+    <span class="label major" style="left:${layout.centerX}px;top:${layout.centerY - layout.centerRadius + 24}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(bandLabel(family.name))}</span>
     ${chordLabels}
     ${familyLabels}
     ${NODE_MANIPULATION_ENABLED ? `<span class="label action plus" style="left:${layout.addX}px;top:${layout.addY}px">+</span>` : ""}
@@ -1918,7 +1918,7 @@ function schedulePulseRedraw(): void {
       return;
     }
 
-    redrawCanvasOnly(canvas, false);
+    redrawCanvasOnly(canvas);
     if (pulseStrengthAt(nowMs) > 0) {
       schedulePulseRedraw();
     }
@@ -2520,13 +2520,10 @@ function cycleSelectedNode(): void {
   });
 }
 
-function redrawCanvasOnly(canvas: HTMLCanvasElement, clampViewport = true): void {
+function redrawCanvasOnly(canvas: HTMLCanvasElement): void {
   const state = store.getState();
   const rect = canvas.getBoundingClientRect();
   const layout = buildLayout(rect.width, rect.height);
-  if (clampViewport) {
-    constrainGraphViewport(state, layout);
-  }
   const geometry = buildSceneGeometry(state, layout);
   hitZones = buildHitZones(layout, geometry, state);
   drawFallback2d(canvas, layout, geometry, state);
@@ -2801,7 +2798,7 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
     const pointerY = event.clientY - rect.top;
     const oldZoom = sceneZoom;
     const zoomDirection = event.deltaY > 0 ? -0.06 : 0.06;
-    const newZoom = clamp(sceneZoom + zoomDirection, 0.68, 1.85);
+    const newZoom = clamp(sceneZoom + zoomDirection, 0.30, 1.85);
     if (newZoom === oldZoom) {
       return;
     }
@@ -2814,7 +2811,7 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
     scenePan.y += (pointerY - centerY) * (1 - ratio);
 
     sceneZoom = newZoom;
-    redrawCanvasOnly(canvas, false);
+    redrawCanvasOnly(canvas);
   }, { passive: false });
 
   canvas.addEventListener("pointerdown", (event) => {
@@ -2859,7 +2856,7 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
       };
       pressContext.lastX = event.clientX;
       pressContext.lastY = event.clientY;
-      redrawCanvasOnly(canvas, false);
+      redrawCanvasOnly(canvas);
     } else if (pressContext.mode === "pan") {
       const deltaX = event.clientX - pressContext.lastX;
       const deltaY = event.clientY - pressContext.lastY;
@@ -2867,7 +2864,7 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
       scenePan.y += deltaY;
       pressContext.lastX = event.clientX;
       pressContext.lastY = event.clientY;
-      redrawCanvasOnly(canvas, false);
+      redrawCanvasOnly(canvas);
     }
   });
 
@@ -2972,6 +2969,24 @@ function mountStage(): void {
   bindDebugFooter(shell);
   bindCanvasInteractions(canvas);
 
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+  }
+
+  resizeObserver = new ResizeObserver(() => {
+    const c = root.querySelector<HTMLCanvasElement>(".webgl-stage");
+    if (!c) {
+      return;
+    }
+    if (!stage) {
+      redrawCanvasOnly(c);
+    } else {
+      render();
+    }
+  });
+
+  resizeObserver.observe(shell);
+
   if (FORCE_CANVAS_RENDERER) {
     stage = null;
     drawFallback2d(canvas, layout, geometry, state);
@@ -2993,16 +3008,6 @@ function mountStage(): void {
   }
 
   stage.setScene(state, layout, geometry);
-
-  if (resizeObserver) {
-    resizeObserver.disconnect();
-  }
-
-  resizeObserver = new ResizeObserver(() => {
-    render();
-  });
-
-  resizeObserver.observe(shell);
 }
 
 function render(): void {
