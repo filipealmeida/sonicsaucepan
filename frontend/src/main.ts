@@ -40,6 +40,8 @@ type AppState = {
   settings: AppSettings;
   savedLoopDraft: string;
   savedLoopSelectedIndex: number;
+  debugInput: string;
+  debugLogs: string[];
   status: string;
 };
 
@@ -58,6 +60,7 @@ type AppSettings = {
   showPanel: boolean;
   showPerformPanel: boolean;
   showSavedLoopsPanel: boolean;
+  debugFooterEnabled: boolean;
   centralTone: string;
   bpm: number;
   timeSignature: TimeSignatureOption;
@@ -143,6 +146,7 @@ const CENTRAL_TONES = [
 const WAVEFORMS: WaveformOption[] = ["sine", "triangle", "sawtooth", "square"];
 const TIME_SIGNATURES: TimeSignatureOption[] = ["4/4", "3/4", "6/8"];
 const EFFECT_OPTIONS: EffectOption[] = ["none", "delay", "chorus"];
+const MAX_DEBUG_LOGS = 220;
 const DUMMY_SAVED_PROGRESSIONS = [
   "Neon Cadence",
   "Glass Harbor",
@@ -429,6 +433,7 @@ function defaultSettings(): AppSettings {
     showPanel: false,
     showPerformPanel: false,
     showSavedLoopsPanel: false,
+    debugFooterEnabled: true,
     centralTone: "C",
     bpm: 96,
     timeSignature: "4/4",
@@ -621,6 +626,7 @@ function loadSettings(): AppSettings {
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
     return {
       ...defaults,
+      debugFooterEnabled: parsed.debugFooterEnabled !== false,
       centralTone: normalizeCentralTone(parsed.centralTone),
       bpm: normalizeBpm(parsed.bpm),
       timeSignature: normalizeTimeSignature(parsed.timeSignature),
@@ -643,6 +649,7 @@ function loadSettings(): AppSettings {
 function saveSettings(settings: AppSettings): void {
   try {
     const persisted = {
+      debugFooterEnabled: settings.debugFooterEnabled,
       centralTone: settings.centralTone,
       bpm: settings.bpm,
       timeSignature: settings.timeSignature,
@@ -685,6 +692,31 @@ function normalizeRootToken(rootText: string): string {
   const letter = trimmed[0]?.toUpperCase() ?? "C";
   const accidental = trimmed[1] === "#" || trimmed[1] === "b" ? trimmed[1] : "";
   return `${letter}${accidental}`;
+}
+
+function chordTonesFromIntervals(chord: ChordEntry, centralTone: string): string[] {
+  const rootTokenRaw = typeof chord.root === "string" && chord.root.trim().length > 0
+    ? chord.root
+    : (chord.full_name.match(/^([A-Ga-g][#b]?)/)?.[1] ?? centralTone);
+  const rootToken = normalizeRootToken(rootTokenRaw);
+  const rootSemitone = noteToSemitone(rootToken);
+  if (rootSemitone === null) {
+    return [];
+  }
+
+  const preferFlats = rootToken.includes("b");
+  const rawIntervals = Array.isArray(chord.intervals) ? chord.intervals : [];
+  const semitoneSteps = rawIntervals
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value >= 1)
+    .map((value) => Math.floor(value) - 1);
+
+  if (semitoneSteps.length === 0) {
+    return [];
+  }
+
+  const unique = [...new Set(semitoneSteps)];
+  return unique.map((step) => semitoneToNote(rootSemitone + step, preferFlats));
 }
 
 function chordToMidi(chord: ChordEntry): number[] {
@@ -818,6 +850,11 @@ function playChordPreview(chord: ChordEntry): void {
   const state = store.getState();
   const waveform = state.settings.waveform;
   const effects = state.settings.effects;
+  const match = findChordInCatalog(state.catalog, chord.full_name);
+  const familyName = match ? state.catalog.families[match.familyIndex]?.name ?? "Unknown family" : "Unknown family";
+  const tones = chordTonesFromIntervals(chord, state.settings.centralTone);
+  const tonesText = tones.length > 0 ? tones.join(" ") : "n/a";
+  appendDebugLog(`[audio] ${familyName} | ${chord.full_name} | tones: ${tonesText} | wave=${waveform} fx=${effects}`);
 
   sendMidiPreview(chord);
 
@@ -973,8 +1010,25 @@ const store = createStore<AppState>(() => ({
   settings: initialSettings,
   savedLoopDraft: "",
   savedLoopSelectedIndex: 0,
+  debugInput: "",
+  debugLogs: ["[system] Debug footer initialized"],
   status: "Initial state ready",
 }));
+
+function appendDebugLog(message: string): void {
+  const state = store.getState();
+  const stamp = new Date().toISOString();
+  const line = `${stamp} ${message}`;
+  const merged = [...state.debugLogs, line];
+  const nextLogs = merged.length > MAX_DEBUG_LOGS
+    ? merged.slice(merged.length - MAX_DEBUG_LOGS)
+    : merged;
+
+  store.setState({
+    ...state,
+    debugLogs: nextLogs,
+  });
+}
 
 function updateSettings(patch: Partial<AppSettings>, status?: string): void {
   const state = store.getState();
@@ -1517,6 +1571,14 @@ class WebGlStage {
 }
 
 function overlay(rootEl: HTMLElement, state: AppState, layout: StageLayout, geometry: SceneGeometry): void {
+  const activeDebugInput = document.activeElement instanceof HTMLInputElement && document.activeElement.matches("input[data-debug-input]")
+    ? document.activeElement
+    : null;
+  if (activeDebugInput) {
+    debugFooterDraft = activeDebugInput.value;
+    restoreDebugInputFocus = true;
+  }
+
   const selectedChord = getSelectedChord(state);
   const family = getSelectedChordFamily(state);
   const selectedNode = state.graph.nodes[state.graph.selectedNodeId];
@@ -1544,10 +1606,38 @@ function overlay(rootEl: HTMLElement, state: AppState, layout: StageLayout, geom
         ${overlayContent}
       </div>
       <div class="status">${status}</div>
+      ${buildDebugFooter(state)}
       ${buildSettingsPanel(state)}
       ${buildPerformPanel(state)}
       ${buildSavedLoopsPanel(state)}
     </div>
+  `;
+}
+
+function buildDebugFooter(state: AppState): string {
+  if (!state.settings.debugFooterEnabled) {
+    return "";
+  }
+
+  const rows = state.debugLogs
+    .map((line) => `<div class="debug-log-line">${escapeHtml(line)}</div>`)
+    .join("");
+
+  return `
+    <section class="debug-footer" aria-label="Debug footer">
+      <div class="debug-log" data-debug-log>${rows}</div>
+      <form class="debug-input-row" data-debug-form>
+        <span class="debug-prompt">&gt;</span>
+        <input
+          type="text"
+          data-debug-input
+          value="${escapeAttr(debugFooterDraft)}"
+          placeholder="type debug note and press Enter"
+          aria-label="Debug input"
+          autocomplete="off"
+        />
+      </form>
+    </section>
   `;
 }
 
@@ -1581,6 +1671,10 @@ function buildSettingsPanel(state: AppState): string {
           <label class="settings-field inline">
             <span>MIDI</span>
             <input type="checkbox" data-setting="midi-enabled" ${settings.midiEnabled ? "checked" : ""} />
+          </label>
+          <label class="settings-field inline">
+            <span>Debug Footer</span>
+            <input type="checkbox" data-setting="debug-footer-enabled" ${settings.debugFooterEnabled ? "checked" : ""} />
           </label>
           <label class="settings-field">
             <span>MIDI Port</span>
@@ -1757,6 +1851,8 @@ let performCursorNodeId: number | null = null;
 let performStepCount = 0;
 let modalOpenCount = 0;
 let resumePerformAfterModalClose = false;
+let debugFooterDraft = "";
+let restoreDebugInputFocus = false;
 const nodeOffsets: Record<number, { x: number; y: number }> = {};
 
 const CENTER_PULSE_MS = 620;
@@ -2562,6 +2658,58 @@ function bindSettingsPanel(shell: HTMLElement): void {
     const channel = clamp(Number(midiChannelSelect.value) || 1, 1, 16);
     updateSettings({ midiChannel: channel }, `MIDI channel set to ${channel}`);
   });
+
+  const debugToggle = shell.querySelector<HTMLInputElement>("input[data-setting='debug-footer-enabled']");
+  debugToggle?.addEventListener("change", () => {
+    const enabled = debugToggle.checked;
+    updateSettings({ debugFooterEnabled: enabled }, enabled ? "Debug footer enabled" : "Debug footer disabled");
+  });
+}
+
+function bindDebugFooter(shell: HTMLElement): void {
+  const debugLog = shell.querySelector<HTMLElement>("[data-debug-log]");
+  if (debugLog) {
+    debugLog.scrollTop = debugLog.scrollHeight;
+  }
+
+  const input = shell.querySelector<HTMLInputElement>("input[data-debug-input]");
+  if (input) {
+    input.addEventListener("input", () => {
+      debugFooterDraft = input.value;
+    });
+
+    input.addEventListener("focus", () => {
+      restoreDebugInputFocus = true;
+    });
+
+    input.addEventListener("blur", () => {
+      restoreDebugInputFocus = false;
+      debugFooterDraft = input.value;
+    });
+
+    if (restoreDebugInputFocus) {
+      input.focus();
+      const cursor = input.value.length;
+      input.setSelectionRange(cursor, cursor);
+      restoreDebugInputFocus = false;
+    }
+  }
+
+  const form = shell.querySelector<HTMLFormElement>("form[data-debug-form]");
+  form?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = (input?.value ?? "").trim();
+    if (!value) {
+      return;
+    }
+
+    restoreDebugInputFocus = true;
+    debugFooterDraft = "";
+    appendDebugLog(`[input] ${value}`);
+    if (input) {
+      input.value = "";
+    }
+  });
 }
 
 function bindPerformPanel(shell: HTMLElement): void {
@@ -2821,6 +2969,7 @@ function mountStage(): void {
   bindSettingsPanel(shell);
   bindPerformPanel(shell);
   bindSavedLoopsPanel(shell);
+  bindDebugFooter(shell);
   bindCanvasInteractions(canvas);
 
   if (FORCE_CANVAS_RENDERER) {

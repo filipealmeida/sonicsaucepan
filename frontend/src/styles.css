@@ -253,7 +253,7 @@ body {
   display: none;
   position: absolute;
   left: 50%;
-  bottom: 14px;
+  bottom: 136px;
   transform: translateX(-50%);
   padding: 8px 12px;
   border-radius: 999px;
@@ -263,6 +263,70 @@ body {
   backdrop-filter: blur(10px);
   font-size: 0.82rem;
   letter-spacing: 0.04em;
+}
+
+.debug-footer {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  z-index: 5;
+  border-radius: 12px;
+  border: 1px solid rgba(116, 175, 255, 0.34);
+  background: rgba(4, 9, 20, 0.88);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.debug-log {
+  height: min(140px, 24vh);
+  overflow-y: auto;
+  padding: 10px 12px;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: rgba(183, 228, 255, 0.94);
+  background: linear-gradient(180deg, rgba(8, 17, 35, 0.72), rgba(5, 11, 23, 0.9));
+}
+
+.debug-log-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.debug-input-row {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  border-top: 1px solid rgba(108, 171, 255, 0.28);
+  padding: 8px 10px;
+  background: rgba(8, 15, 31, 0.92);
+}
+
+.debug-prompt {
+  color: rgba(127, 222, 255, 0.9);
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.debug-input-row input {
+  width: 100%;
+  border: 1px solid rgba(110, 170, 255, 0.35);
+  border-radius: 8px;
+  background: rgba(4, 9, 20, 0.95);
+  color: rgba(211, 239, 255, 0.97);
+  padding: 7px 9px;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 0.82rem;
+}
+
+.debug-input-row input:focus {
+  outline: none;
+  border-color: rgba(121, 219, 255, 0.7);
+  box-shadow: 0 0 0 2px rgba(96, 181, 255, 0.18);
 }
 
 .settings-modal {
@@ -500,6 +564,17 @@ body {
     bottom: 10px;
     max-width: calc(100vw - 28px);
     text-align: center;
+  }
+
+  .debug-footer {
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+  }
+
+  .debug-log {
+    height: min(126px, 28vh);
+    font-size: 0.75rem;
   }
 
   .settings-panel {
