@@ -115,7 +115,7 @@ type SceneGeometry = {
 const STORAGE_KEY = "sonic-saucepan-session-graph-v1";
 const SETTINGS_STORAGE_KEY = "sonic-saucepan-settings-v1";
 const MAX_SEGMENTS = 16;
-const CATALOG = catalogJson as ChordCatalog;
+const CATALOG_TEMPLATE = catalogJson as ChordCatalog;
 const NODE_MANIPULATION_ENABLED = false;
 const CENTRAL_TONES = [
   "A",
@@ -467,6 +467,150 @@ function normalizeCentralTone(value: unknown): string {
   return CENTRAL_TONES.includes(tone as (typeof CENTRAL_TONES)[number]) ? tone : "C";
 }
 
+function noteToSemitone(note: string): number | null {
+  const normalized = note.trim();
+  const semitones: Record<string, number> = {
+    C: 0,
+    "B#": 0,
+    "C#": 1,
+    Db: 1,
+    D: 2,
+    "D#": 3,
+    Eb: 3,
+    E: 4,
+    Fb: 4,
+    F: 5,
+    "E#": 5,
+    "F#": 6,
+    Gb: 6,
+    G: 7,
+    "G#": 8,
+    Ab: 8,
+    A: 9,
+    "A#": 10,
+    Bb: 10,
+    B: 11,
+    Cb: 11,
+  };
+  return semitones[normalized] ?? null;
+}
+
+function semitoneToNote(semitone: number, preferFlats: boolean): string {
+  const sharpNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const flatNames = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+  const index = ((semitone % 12) + 12) % 12;
+  return preferFlats ? flatNames[index] : sharpNames[index];
+}
+
+function transposeNoteName(note: string, deltaSemitones: number, preferFlats: boolean): string {
+  const source = noteToSemitone(note);
+  if (source === null) {
+    return note;
+  }
+  return semitoneToNote(source + deltaSemitones, preferFlats);
+}
+
+function transposeChordName(fullName: string, deltaSemitones: number, preferFlats: boolean): string {
+  const match = fullName.match(/^([A-G](?:#|b)?)(.*)$/);
+  if (!match) {
+    return fullName;
+  }
+  const [, rootToken, suffix] = match;
+  const nextRoot = transposeNoteName(rootToken, deltaSemitones, preferFlats);
+  return `${nextRoot}${suffix}`;
+}
+
+function transposeCatalogForCentralTone(catalog: ChordCatalog, centralTone: string): ChordCatalog {
+  const tone = normalizeCentralTone(centralTone);
+  const targetSemitone = noteToSemitone(tone);
+  if (targetSemitone === null) {
+    return catalog;
+  }
+
+  const deltaSemitones = ((targetSemitone - noteToSemitone("C")!) % 12 + 12) % 12;
+  const preferFlats = tone.includes("b");
+
+  return {
+    families: catalog.families.map((family) => ({
+      ...family,
+      chords: family.chords.map((chord) => {
+        if (!chord.numeral) {
+          return { ...chord };
+        }
+
+        const nextChord: ChordEntry = {
+          ...chord,
+          full_name: transposeChordName(chord.full_name, deltaSemitones, preferFlats),
+        };
+
+        if (typeof chord.root === "string") {
+          nextChord.root = transposeNoteName(chord.root, deltaSemitones, preferFlats);
+        } else if (chord.root === null) {
+          nextChord.root = null;
+        }
+
+        return nextChord;
+      }),
+    })),
+  };
+}
+
+function buildChordRenameMap(fromCatalog: ChordCatalog, toCatalog: ChordCatalog): Record<string, string> {
+  const renameMap: Record<string, string> = {};
+  const familyCount = Math.min(fromCatalog.families.length, toCatalog.families.length);
+
+  for (let familyIndex = 0; familyIndex < familyCount; familyIndex += 1) {
+    const sourceFamily = fromCatalog.families[familyIndex];
+    const targetFamily = toCatalog.families[familyIndex];
+    const chordCount = Math.min(sourceFamily.chords.length, targetFamily.chords.length);
+    for (let chordIndex = 0; chordIndex < chordCount; chordIndex += 1) {
+      const sourceChord = sourceFamily.chords[chordIndex];
+      const targetChord = targetFamily.chords[chordIndex];
+      if (!sourceChord.numeral) {
+        continue;
+      }
+
+      const sourceName = sourceChord.full_name.trim();
+      const targetName = targetChord.full_name.trim();
+      if (!sourceName || !targetName || sourceName === targetName) {
+        continue;
+      }
+
+      if (!renameMap[sourceName] || renameMap[sourceName] === targetName) {
+        renameMap[sourceName] = targetName;
+      }
+    }
+  }
+
+  return renameMap;
+}
+
+function applyChordRenameMapToGraph(graph: LoopGraph, renameMap: Record<string, string>): LoopGraph {
+  const keys = Object.keys(renameMap);
+  if (keys.length === 0) {
+    return graph;
+  }
+
+  let changed = false;
+  const nodes: Record<number, GraphNode> = {};
+  for (const [nodeIdText, node] of Object.entries(graph.nodes)) {
+    const nextName = renameMap[node.chordName] ?? node.chordName;
+    if (nextName !== node.chordName) {
+      changed = true;
+    }
+    nodes[Number(nodeIdText)] = nextName === node.chordName ? node : { ...node, chordName: nextName };
+  }
+
+  if (!changed) {
+    return graph;
+  }
+
+  return {
+    ...graph,
+    nodes,
+  };
+}
+
 function loadSettings(): AppSettings {
   const defaults = defaultSettings();
   try {
@@ -809,22 +953,24 @@ async function refreshMidiPorts(): Promise<void> {
   }
 }
 
+const initialSettings = loadSettings();
+const initialCatalog = transposeCatalogForCentralTone(CATALOG_TEMPLATE, initialSettings.centralTone);
 const savedGraph = null;
-const startingGraph = createInitialGraph(initialChordName(CATALOG));
+const startingGraph = createInitialGraph(initialChordName(initialCatalog));
 const initialSelectedNode =
   startingGraph.nodes[startingGraph.selectedNodeId] ??
   startingGraph.nodes[startingGraph.headId];
 const initialSelection = initialSelectedNode
-  ? findChordInCatalog(CATALOG, initialSelectedNode.chordName)
+  ? findChordInCatalog(initialCatalog, initialSelectedNode.chordName)
   : null;
 
 const store = createStore<AppState>(() => ({
-  catalog: CATALOG,
+  catalog: initialCatalog,
   selectedFamilyIndex: initialSelection?.familyIndex ?? 0,
   selectedChordIndex: initialSelection?.chordIndex ?? 0,
   chordFanVisible: false,
   graph: startingGraph,
-  settings: loadSettings(),
+  settings: initialSettings,
   savedLoopDraft: "",
   savedLoopSelectedIndex: 0,
   status: "Initial state ready",
@@ -836,9 +982,24 @@ function updateSettings(patch: Partial<AppSettings>, status?: string): void {
     ...state.settings,
     ...patch,
   };
+  settings.centralTone = normalizeCentralTone(settings.centralTone);
+
+  let catalog = state.catalog;
+  let graph = state.graph;
+  if (settings.centralTone !== state.settings.centralTone) {
+    catalog = transposeCatalogForCentralTone(CATALOG_TEMPLATE, settings.centralTone);
+    const renameMap = buildChordRenameMap(state.catalog, catalog);
+    graph = applyChordRenameMapToGraph(state.graph, renameMap);
+    if (graph !== state.graph) {
+      saveGraph(graph);
+    }
+  }
+
   saveSettings(settings);
   store.setState({
     ...state,
+    catalog,
+    graph,
     settings,
     status: status ?? state.status,
   });

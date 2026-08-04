@@ -1,136 +1,229 @@
 {
   "families": [
     {
-      "name": "Diatonic Chords in C Major",
+      "name": "Major",
       "chords": [
         {
           "numeral": "I",
-          "full_name": "Cmaj7add9",
-          "intervals": [1, 3, 5, 7, 9],
+          "full_name": "C",
+          "intervals": [
+            1,
+            5,
+            8
+          ],
           "root": null
         },
         {
           "numeral": "ii",
-          "full_name": "Dm7",
-          "intervals": [1, 3, 5, 7],
+          "full_name": "Dm",
+          "intervals": [
+            1,
+            4,
+            8
+          ],
           "root": null
         },
         {
           "numeral": "iii",
-          "full_name": "Em7",
-          "intervals": [1, 3, 5, 7],
+          "full_name": "Em",
+          "intervals": [
+            1,
+            4,
+            8
+          ],
           "root": null
         },
         {
           "numeral": "IV",
-          "full_name": "Fmaj7",
-          "intervals": [1, 3, 5, 7],
+          "full_name": "F",
+          "intervals": [
+            1,
+            5,
+            8
+          ],
           "root": null
         },
         {
           "numeral": "V",
-          "full_name": "G7",
-          "intervals": [1, 3, 5, 7],
+          "full_name": "G",
+          "intervals": [
+            1,
+            5,
+            8
+          ],
           "root": null
         },
         {
           "numeral": "vi",
-          "full_name": "Am7",
-          "intervals": [1, 3, 5, 7],
+          "full_name": "Am",
+          "intervals": [
+            1,
+            4,
+            8
+          ],
           "root": null
         },
         {
           "numeral": "vii",
-          "full_name": "Bm7b5",
-          "intervals": [1, 3, 5, 7],
+          "full_name": "Bdim",
+          "intervals": [
+            1,
+            4,
+            7
+          ],
           "root": null
         }
       ]
     },
     {
-      "name": "Secondary Dominants in C Major",
+      "name": "V/V",
       "chords": [
         {
           "numeral": "V/ii",
           "full_name": "A7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "A"
         },
         {
           "numeral": "V/iii",
           "full_name": "B7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "B"
         },
         {
           "numeral": "V/IV",
           "full_name": "C7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "C"
         },
         {
           "numeral": "V/V",
           "full_name": "D7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "D"
         },
         {
           "numeral": "V/vi",
           "full_name": "E7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "E"
         },
         {
           "numeral": "V/vii",
           "full_name": "F#7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "F#"
         }
       ]
     },
     {
-      "name": "Modal Interchange / Borrowed Chords",
+      "name": "Borrowed",
       "chords": [
         {
           "numeral": "bII",
           "full_name": "Dbmaj7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            12
+          ],
           "root": "Db"
         },
         {
           "numeral": "ii",
           "full_name": "Dm7b5",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            7,
+            11
+          ],
           "root": "D"
         },
         {
           "numeral": "bIII",
           "full_name": "Ebmaj7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            12
+          ],
           "root": "Eb"
         },
         {
           "numeral": "IV",
           "full_name": "Fm7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
           "root": "F"
         },
         {
           "numeral": "V",
           "full_name": "Gm7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
           "root": "G"
         },
         {
           "numeral": "bVI",
           "full_name": "Abmaj7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            12
+          ],
           "root": "Ab"
         },
         {
           "numeral": "bVII",
           "full_name": "Bb7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Bb"
         }
       ]
@@ -141,90 +234,160 @@
         {
           "numeral": "ii/IV",
           "full_name": "Gm7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
           "root": "G"
         },
         {
           "numeral": "V/IV",
           "full_name": "C7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "C"
         },
         {
           "numeral": "ii/vi",
           "full_name": "Bm7b5",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            7,
+            11
+          ],
           "root": "B"
         },
         {
           "numeral": "V/vi",
           "full_name": "E7alt",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "E"
         },
         {
           "numeral": "backdoor ii",
           "full_name": "Fm7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
           "root": "F"
         },
         {
           "numeral": "backdoor V",
           "full_name": "Bb7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Bb"
         },
         {
           "numeral": "tritone ii",
           "full_name": "Abm7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
           "root": "Ab"
         },
         {
           "numeral": "tritone V",
           "full_name": "Db7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Db"
         }
       ]
     },
     {
-      "name": "Tritone Substitutions",
+      "name": "Tritone Subs",
       "chords": [
         {
           "numeral": "sub for V",
           "full_name": "Db7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Db"
         },
         {
           "numeral": "sub for V/ii",
           "full_name": "Eb7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Eb"
         },
         {
           "numeral": "sub for V/iii",
           "full_name": "Gb7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Gb"
         },
         {
           "numeral": "sub for V/IV",
           "full_name": "Gb7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Gb"
         },
         {
           "numeral": "sub for V/V",
           "full_name": "Ab7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Ab"
         },
         {
           "numeral": "sub for V/vi",
           "full_name": "Bb7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Bb"
         }
       ]
@@ -235,37 +398,73 @@
         {
           "numeral": "approach to I",
           "full_name": "Bdim7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            7,
+            10,
+            11
+          ],
           "root": "B"
         },
         {
           "numeral": "approach to ii",
           "full_name": "C#dim7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            7,
+            10,
+            11
+          ],
           "root": "C#"
         },
         {
           "numeral": "approach to iii",
           "full_name": "D#dim7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            7,
+            10,
+            11
+          ],
           "root": "D#"
         },
         {
           "numeral": "approach to V",
           "full_name": "F#dim7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            7,
+            10,
+            11
+          ],
           "root": "F#"
         },
         {
           "numeral": "approach to vi",
           "full_name": "G#dim7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            7,
+            10,
+            11
+          ],
           "root": "G#"
         },
         {
           "numeral": "approach to vii",
           "full_name": "A#dim7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            7,
+            10,
+            11
+          ],
           "root": "A#"
         }
       ]
@@ -276,31 +475,57 @@
         {
           "numeral": "V",
           "full_name": "G7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "G"
         },
         {
           "numeral": "subV",
           "full_name": "Bb7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Bb"
         },
         {
           "numeral": "subV",
           "full_name": "Db7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "Db"
         },
         {
           "numeral": "subV",
           "full_name": "E7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
           "root": "E"
         },
         {
           "numeral": "diminished source",
           "full_name": "Abdim7",
-          "intervals": [1, 3, 5, 7],
+          "intervals": [
+            1,
+            4,
+            7,
+            10,
+            11
+          ],
           "root": "Ab"
         }
       ]
@@ -310,15 +535,32 @@
       "chords": [
         {
           "full_name": "Cmaj9Voicing",
-          "midi_notes": [60, 64, 67, 71, 74]
+          "midi_notes": [
+            60,
+            64,
+            67,
+            71,
+            74
+          ]
         },
         {
           "full_name": "Am7Voicing",
-          "midi_notes": [57, 60, 64, 67]
+          "midi_notes": [
+            57,
+            60,
+            64,
+            67
+          ]
         },
         {
           "full_name": "G7AltVoicing",
-          "midi_notes": [55, 59, 62, 65, 68]
+          "midi_notes": [
+            55,
+            59,
+            62,
+            65,
+            68
+          ]
         }
       ]
     },
@@ -327,7 +569,11 @@
       "chords": [
         {
           "full_name": "C",
-          "intervals": [1, 3, 5]
+          "intervals": [
+            1,
+            5,
+            8
+          ]
         }
       ]
     }
