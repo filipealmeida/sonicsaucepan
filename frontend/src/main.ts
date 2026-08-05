@@ -74,6 +74,9 @@ type SavedLoopRecord = {
     timeSignature: TimeSignatureOption;
     beatsPerChord: number;
     swing: number;
+    humanizeAmount: number;
+    accentStrength: number;
+    layerWidth: number;
     waveform: WaveformOption;
     effects: EffectOption;
     bassPreset: BassPresetOption;
@@ -126,6 +129,9 @@ type AppSettings = {
   timeSignature: TimeSignatureOption;
   beatsPerChord: number;
   swing: number;
+  humanizeAmount: number;
+  accentStrength: number;
+  layerWidth: number;
   waveform: WaveformOption;
   effects: EffectOption;
   bassPreset: BassPresetOption;
@@ -133,6 +139,13 @@ type AppSettings = {
   midiPortId: string;
   midiChannel: number;
   midiPorts: MidiPortOption[];
+};
+
+type EnvelopeParams = {
+  attackSec: number;
+  decaySec: number;
+  sustainLevel: number;
+  releaseSec: number;
 };
 
 type StageLayout = {
@@ -220,6 +233,27 @@ const BASS_PRESET_LABELS: Record<BassPresetOption, string> = {
   stride: "Stride",
 };
 const MAX_DEBUG_LOGS = 220;
+const CHORD_ENVELOPE: EnvelopeParams = {
+  attackSec: 0.016,
+  decaySec: 0.09,
+  sustainLevel: 0.72,
+  releaseSec: 0.11,
+};
+const BASS_ENVELOPE: EnvelopeParams = {
+  attackSec: 0.008,
+  decaySec: 0.08,
+  sustainLevel: 0.64,
+  releaseSec: 0.095,
+};
+const HUMANIZE_ONSET_SEC = 0.004;
+const HUMANIZE_DETUNE_CENTS = 3.5;
+const CHORD_UNISON_DETUNE_CENTS = 7;
+
+type SynthLayer = {
+  waveform: OscillatorType;
+  gain: number;
+  detuneCents: number;
+};
 
 const GRAPH_NODE_TYPE_REGISTRY: Record<GraphNodeType, GraphNodeTypeConfig> = {
   "chord-selection": {
@@ -268,6 +302,52 @@ if (!root) {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function randomCentered(amount: number): number {
+  return (Math.random() * 2 - 1) * amount;
+}
+
+function computeAccent(beatWithinChord: number, stepsPerChord: number, strengthPercent: number): number {
+  let baseAccent = 1;
+  if (beatWithinChord > 0) {
+    const midpoint = Math.max(1, Math.floor(stepsPerChord / 2));
+    baseAccent = stepsPerChord >= 4 && beatWithinChord === midpoint ? 0.86 : 0.76;
+  }
+  const strength = clamp(strengthPercent / 100, 0, 1.5);
+  return 1 - (1 - baseAccent) * strength;
+}
+
+function scheduleAdsrEnvelope(
+  gainParam: AudioParam,
+  startTime: number,
+  noteDurationSec: number,
+  peak: number,
+  envelope: EnvelopeParams,
+): void {
+  const duration = Math.max(0.04, noteDurationSec);
+  const attackEnd = startTime + Math.min(envelope.attackSec, duration * 0.35);
+  const decayEnd = Math.min(attackEnd + envelope.decaySec, startTime + duration * 0.72);
+  const sustainValue = Math.max(0.0001, peak * clamp(envelope.sustainLevel, 0, 1));
+  const releaseStart = Math.max(decayEnd, startTime + duration - envelope.releaseSec);
+  const releaseEnd = startTime + duration;
+
+  gainParam.setValueAtTime(0.0001, startTime);
+  gainParam.linearRampToValueAtTime(Math.max(0.0002, peak), attackEnd);
+  gainParam.linearRampToValueAtTime(sustainValue, decayEnd);
+  gainParam.setValueAtTime(sustainValue, releaseStart);
+  gainParam.exponentialRampToValueAtTime(0.0001, releaseEnd);
+}
+
+function chordLayersForWaveform(waveform: WaveformOption, chorusDepthCents: number, widthPercent: number): SynthLayer[] {
+  const widthScale = clamp(widthPercent / 100, 0, 1.6);
+  const base: SynthLayer = { waveform, gain: 0.56, detuneCents: 0 };
+  return [
+    base,
+    { waveform, gain: 0.21, detuneCents: (CHORD_UNISON_DETUNE_CENTS + chorusDepthCents) * widthScale },
+    { waveform, gain: 0.21, detuneCents: (-CHORD_UNISON_DETUNE_CENTS - chorusDepthCents) * widthScale },
+    { waveform: "triangle", gain: 0.14, detuneCents: 0 },
+  ];
 }
 
 function wrapIndex(index: number, length: number): number {
@@ -717,6 +797,9 @@ function currentLoopStateSignature(state: AppState): string {
       timeSignature: state.settings.timeSignature,
       beatsPerChord: state.settings.beatsPerChord,
       swing: state.settings.swing,
+      humanizeAmount: state.settings.humanizeAmount,
+      accentStrength: state.settings.accentStrength,
+      layerWidth: state.settings.layerWidth,
       waveform: state.settings.waveform,
       effects: state.settings.effects,
       bassPreset: state.settings.bassPreset,
@@ -753,6 +836,9 @@ function defaultSettings(): AppSettings {
     timeSignature: "4/4",
     beatsPerChord: 4,
     swing: 0,
+    humanizeAmount: 34,
+    accentStrength: 100,
+    layerWidth: 58,
     waveform: "triangle",
     effects: "none",
     bassPreset: "root",
@@ -785,6 +871,21 @@ function normalizeBpm(value: unknown): number {
 
 function normalizeSwing(value: unknown): number {
   return clamp(Number(value) || 0, 0, 75);
+}
+
+function normalizeHumanizeAmount(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? clamp(n, 0, 100) : 34;
+}
+
+function normalizeAccentStrength(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? clamp(n, 0, 150) : 100;
+}
+
+function normalizeLayerWidth(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? clamp(n, 0, 100) : 58;
 }
 
 const BEATS_PER_CHORD_OPTIONS = [0.125, 0.25, 0.5, 1, 2, 3, 4, 8] as const;
@@ -963,6 +1064,9 @@ function loadSettings(): AppSettings {
       timeSignature: normalizeTimeSignature(parsed.timeSignature),
       beatsPerChord: normalizeBeatsPerChord(parsed.beatsPerChord),
       swing: normalizeSwing(parsed.swing),
+      humanizeAmount: normalizeHumanizeAmount(parsed.humanizeAmount),
+      accentStrength: normalizeAccentStrength(parsed.accentStrength),
+      layerWidth: normalizeLayerWidth(parsed.layerWidth),
       waveform: normalizeWaveform(parsed.waveform),
       effects: normalizeEffects(parsed.effects),
       bassPreset: normalizeBassPreset(parsed.bassPreset),
@@ -989,6 +1093,9 @@ function saveSettings(settings: AppSettings): void {
       timeSignature: settings.timeSignature,
       beatsPerChord: settings.beatsPerChord,
       swing: settings.swing,
+      humanizeAmount: settings.humanizeAmount,
+      accentStrength: settings.accentStrength,
+      layerWidth: settings.layerWidth,
       waveform: settings.waveform,
       effects: settings.effects,
       bassPreset: settings.bassPreset,
@@ -1194,28 +1301,55 @@ function computeBassNotes(chord: ChordEntry, preset: BassPresetOption, beatWithi
   }
 }
 
-function playBassNotes(midiNotes: number[], beatMs: number): void {
+function playBassNotes(
+  midiNotes: number[],
+  beatMs: number,
+  options?: { velocity?: number; humanize?: boolean; accent?: number; humanizeAmount?: number },
+): void {
   if (midiNotes.length === 0) return;
   let context: AudioContext;
   try { context = getAudioContext(); } catch { return; }
   if (context.state === "suspended") void context.resume();
 
   const now = context.currentTime;
-  const sustainSec = Math.max(0.06, (beatMs * 0.75) / 1000);
+  const sustainSec = Math.max(0.07, (beatMs * 0.78) / 1000);
+  const velocity = clamp(options?.velocity ?? 1, 0.2, 1.2);
+  const accent = clamp(options?.accent ?? 1, 0.6, 1.15);
+  const humanize = options?.humanize !== false;
+  const humanizeDepth = clamp(options?.humanizeAmount ?? 1, 0, 1);
   const master = context.createGain();
   master.connect(context.destination);
-  master.gain.setValueAtTime(0, now);
-  master.gain.linearRampToValueAtTime(0.32, now + 0.012);
-  master.gain.setValueAtTime(0.32, now + sustainSec - 0.04);
-  master.gain.exponentialRampToValueAtTime(0.001, now + sustainSec);
+  master.gain.setValueAtTime(clamp(0.9 * velocity * accent, 0.2, 1.15), now);
 
   midiNotes.forEach((midi, i) => {
-    const osc = context.createOscillator();
-    osc.type = "triangle";
-    osc.frequency.setValueAtTime(midiToFrequency(midi), now);
-    osc.connect(master);
-    osc.start(now + i * 0.004);
-    osc.stop(now + sustainSec + 0.05);
+    const baseFreq = midiToFrequency(midi);
+    const onsetJitter = humanize ? randomCentered(HUMANIZE_ONSET_SEC * 0.75 * humanizeDepth) : 0;
+    const startAt = Math.max(now, now + i * 0.004 + onsetJitter);
+    const detuneJitter = humanize ? randomCentered(HUMANIZE_DETUNE_CENTS * humanizeDepth) : 0;
+    const peak = (0.28 / Math.max(1, midiNotes.length)) * velocity * accent;
+
+    const subOsc = context.createOscillator();
+    const subGain = context.createGain();
+    subOsc.type = "sine";
+    subOsc.frequency.setValueAtTime(baseFreq, startAt);
+    subOsc.detune.setValueAtTime(detuneJitter * 0.3, startAt);
+    scheduleAdsrEnvelope(subGain.gain, startAt, sustainSec, peak, BASS_ENVELOPE);
+    subOsc.connect(subGain);
+    subGain.connect(master);
+
+    const bodyOsc = context.createOscillator();
+    const bodyGain = context.createGain();
+    bodyOsc.type = "triangle";
+    bodyOsc.frequency.setValueAtTime(baseFreq, startAt);
+    bodyOsc.detune.setValueAtTime(5 + detuneJitter, startAt);
+    scheduleAdsrEnvelope(bodyGain.gain, startAt, sustainSec, peak * 0.72, BASS_ENVELOPE);
+    bodyOsc.connect(bodyGain);
+    bodyGain.connect(master);
+
+    subOsc.start(startAt);
+    bodyOsc.start(startAt + 0.0015);
+    subOsc.stop(startAt + sustainSec + 0.06);
+    bodyOsc.stop(startAt + sustainSec + 0.06);
   });
 }
 
@@ -1277,8 +1411,18 @@ function sendMidiPreview(chord: ChordEntry, sustainMs = 920): void {
   }, Math.max(100, sustainMs - 80));
 }
 
-function playChordPreview(chord: ChordEntry, pulseNodeId?: number, sustainMs?: number): void {
-  triggerCenterPulse(pulseNodeId);
+function playChordPreview(
+  chord: ChordEntry,
+  options?: {
+    pulseNodeId?: number;
+    sustainMs?: number;
+    velocity?: number;
+    humanize?: boolean;
+    humanizeAmount?: number;
+    layerWidth?: number;
+  },
+): void {
+  triggerCenterPulse(options?.pulseNodeId);
 
   const state = store.getState();
   const waveform = state.settings.waveform;
@@ -1289,7 +1433,7 @@ function playChordPreview(chord: ChordEntry, pulseNodeId?: number, sustainMs?: n
   const tonesText = tones.length > 0 ? tones.join(" ") : "n/a";
   appendDebugLog(`[audio] ${familyName} | ${chord.full_name} | tones: ${tonesText} | wave=${waveform} fx=${effects}`);
 
-  sendMidiPreview(chord, sustainMs);
+  sendMidiPreview(chord, options?.sustainMs);
 
   let context: AudioContext;
   try {
@@ -1305,9 +1449,11 @@ function playChordPreview(chord: ChordEntry, pulseNodeId?: number, sustainMs?: n
   const frequencies = chordToMidi(chord).map(midiToFrequency);
   const now = context.currentTime;
   // sustain until just before the next chord; default to 1.1s for manual preview
-  const sustainSec = sustainMs !== undefined ? sustainMs / 1000 : 1.1;
-  const releaseSec = Math.min(0.12, sustainSec * 0.08);
-  const holdEnd = now + sustainSec - releaseSec;
+  const sustainSec = options?.sustainMs !== undefined ? options.sustainMs / 1000 : 1.1;
+  const velocity = clamp(options?.velocity ?? 1, 0.25, 1.25);
+  const humanize = options?.humanize !== false;
+  const humanizeDepth = clamp(options?.humanizeAmount ?? 1, 0, 1);
+  const layerWidth = clamp(options?.layerWidth ?? 58, 0, 100);
   const master = context.createGain();
   const dryOutput = context.createGain();
   dryOutput.gain.setValueAtTime(1, now);
@@ -1328,28 +1474,28 @@ function playChordPreview(chord: ChordEntry, pulseNodeId?: number, sustainMs?: n
     wet.connect(context.destination);
   }
 
-  master.gain.setValueAtTime(0, now);
-  master.gain.linearRampToValueAtTime(0.18, now + 0.03);
-  master.gain.setValueAtTime(0.18, holdEnd);
-  master.gain.exponentialRampToValueAtTime(0.001, now + sustainSec);
+  master.gain.setValueAtTime(clamp(0.86 * velocity, 0.2, 1.25), now);
 
-  const detuneSpread = effects === "chorus" ? 11 : 4;
+  const detuneSpread = effects === "chorus" ? 7 : 0;
+  const layers = chordLayersForWaveform(waveform, detuneSpread, layerWidth);
 
   frequencies.forEach((frequency, index) => {
-    const oscillator = context.createOscillator();
-    const voiceGain = context.createGain();
-    const peak = 0.28 / Math.max(1, frequencies.length);
-    oscillator.type = waveform;
-    oscillator.frequency.setValueAtTime(frequency, now);
-    oscillator.detune.setValueAtTime((index - 1) * detuneSpread, now);
-    voiceGain.gain.setValueAtTime(0.0001, now);
-    voiceGain.gain.linearRampToValueAtTime(peak, now + 0.02 + index * 0.01);
-    voiceGain.gain.setValueAtTime(peak, holdEnd);
-    voiceGain.gain.exponentialRampToValueAtTime(0.0001, now + sustainSec + index * 0.01);
-    oscillator.connect(voiceGain);
-    voiceGain.connect(master);
-    oscillator.start(now + index * 0.01);
-    oscillator.stop(now + sustainSec + 0.05 + index * 0.01);
+    const baseStart = now + index * 0.004 + (humanize ? randomCentered(HUMANIZE_ONSET_SEC * humanizeDepth) : 0);
+    const startAt = Math.max(now, baseStart);
+    const voicePeak = (0.24 / Math.max(1, frequencies.length)) * velocity;
+    layers.forEach((layer, layerIndex) => {
+      const oscillator = context.createOscillator();
+      const voiceGain = context.createGain();
+      const detuneJitter = humanize ? randomCentered(HUMANIZE_DETUNE_CENTS * humanizeDepth) : 0;
+      oscillator.type = layer.waveform;
+      oscillator.frequency.setValueAtTime(frequency, startAt);
+      oscillator.detune.setValueAtTime(layer.detuneCents + detuneJitter, startAt);
+      scheduleAdsrEnvelope(voiceGain.gain, startAt, sustainSec, voicePeak * layer.gain, CHORD_ENVELOPE);
+      oscillator.connect(voiceGain);
+      voiceGain.connect(master);
+      oscillator.start(startAt + layerIndex * 0.0012);
+      oscillator.stop(startAt + sustainSec + 0.06 + layerIndex * 0.0012);
+    });
   });
 }
 
@@ -1562,6 +1708,9 @@ function updateSettings(patch: Partial<AppSettings>, status?: string): void {
     ...patch,
   };
   settings.centralTone = normalizeCentralTone(settings.centralTone);
+  settings.humanizeAmount = normalizeHumanizeAmount(settings.humanizeAmount);
+  settings.accentStrength = normalizeAccentStrength(settings.accentStrength);
+  settings.layerWidth = normalizeLayerWidth(settings.layerWidth);
 
   let catalog = state.catalog;
   let graph = state.graph;
@@ -2277,6 +2426,18 @@ function buildPerformPanel(state: AppState): string {
             <input type="range" min="0" max="75" step="1" value="${settings.swing}" data-perform-setting="swing" />
           </label>
           <label class="settings-field">
+            <span data-live-label="humanize-amount">Humanize (${settings.humanizeAmount}%)</span>
+            <input type="range" min="0" max="100" step="1" value="${settings.humanizeAmount}" data-perform-setting="humanize-amount" />
+          </label>
+          <label class="settings-field">
+            <span data-live-label="accent-strength">Accent Strength (${settings.accentStrength}%)</span>
+            <input type="range" min="0" max="150" step="1" value="${settings.accentStrength}" data-perform-setting="accent-strength" />
+          </label>
+          <label class="settings-field">
+            <span data-live-label="layer-width">Layer Width (${settings.layerWidth}%)</span>
+            <input type="range" min="0" max="100" step="1" value="${settings.layerWidth}" data-perform-setting="layer-width" />
+          </label>
+          <label class="settings-field">
             <span>Waveform</span>
             <select data-perform-setting="waveform">${waveformOptions}</select>
           </label>
@@ -2652,7 +2813,18 @@ function triggerCenterPulse(nodeId?: number): void {
   schedulePulseRedraw();
 }
 
-function syncSelectionToNode(nodeId: number, status: string, options?: { updateSelection?: boolean; sustainMs?: number }): void {
+function syncSelectionToNode(
+  nodeId: number,
+  status: string,
+  options?: {
+    updateSelection?: boolean;
+    sustainMs?: number;
+    velocity?: number;
+    humanize?: boolean;
+    humanizeAmount?: number;
+    layerWidth?: number;
+  },
+): void {
   const state = store.getState();
   const node = state.graph.nodes[nodeId];
   if (!node) {
@@ -2674,7 +2846,14 @@ function syncSelectionToNode(nodeId: number, status: string, options?: { updateS
     if (chord) {
       const skipSound = !state.settings.alwaysPlayChords && performPlaying && updateSelection;
       if (!skipSound) {
-        playChordPreview(chord, nodeId, options?.sustainMs);
+        playChordPreview(chord, {
+          pulseNodeId: nodeId,
+          sustainMs: options?.sustainMs,
+          velocity: options?.velocity,
+          humanize: options?.humanize,
+          humanizeAmount: options?.humanizeAmount,
+          layerWidth: options?.layerWidth,
+        });
       }
     }
   }
@@ -2719,21 +2898,35 @@ function performStep(): void {
 
   if (isChordBoundary) {
     const chordName = graph.nodes[performCursorNodeId]?.chordName ?? "state";
-    const { bpm, beatsPerChord, bassPreset } = state.settings;
+    const { bpm, beatsPerChord, bassPreset, accentStrength, humanizeAmount, layerWidth } = state.settings;
     const beatMs = 60000 / clamp(bpm, 40, 240);
     const sustainMs = normalizeBeatsPerChord(beatsPerChord) * beatMs * 0.92;
-    syncSelectionToNode(performCursorNodeId, `Performing ${chordName}`, { updateSelection: false, sustainMs });
+    const chordAccent = computeAccent(0, stepsPerChord, accentStrength);
+    const humanizeDepth = clamp(humanizeAmount / 100, 0, 1);
+    syncSelectionToNode(performCursorNodeId, `Performing ${chordName}`, {
+      updateSelection: false,
+      sustainMs,
+      velocity: chordAccent,
+      humanize: true,
+      humanizeAmount: humanizeDepth,
+      layerWidth,
+    });
     const node = graph.nodes[performCursorNodeId];
     const catalog = state.catalog;
     const match = node ? findChordInCatalog(catalog, node.chordName) : null;
     const chordEntry = match ? catalog.families[match.familyIndex]?.chords[match.chordIndex] : null;
     if (chordEntry) {
       const bassNotes = computeBassNotes(chordEntry, bassPreset, 0, stepsPerChord);
-      playBassNotes(bassNotes, beatMs);
+      playBassNotes(bassNotes, beatMs, {
+        velocity: chordAccent,
+        accent: chordAccent,
+        humanize: true,
+        humanizeAmount: humanizeDepth,
+      });
     }
   } else {
     // On non-boundary beats, handle beat-aware bass patterns (oom-pah, stride).
-    const { bpm, bassPreset } = state.settings;
+    const { bpm, bassPreset, accentStrength, humanizeAmount } = state.settings;
     const beatMs = 60000 / clamp(bpm, 40, 240);
     const beatWithinChord = performStepCount % stepsPerChord;
     const node = performCursorNodeId !== null ? graph.nodes[performCursorNodeId] : null;
@@ -2741,7 +2934,14 @@ function performStep(): void {
     const chordEntry = match ? state.catalog.families[match.familyIndex]?.chords[match.chordIndex] : null;
     if (chordEntry) {
       const bassNotes = computeBassNotes(chordEntry, bassPreset, beatWithinChord, stepsPerChord);
-      playBassNotes(bassNotes, beatMs);
+      const beatAccent = computeAccent(beatWithinChord, stepsPerChord, accentStrength);
+      const humanizeDepth = clamp(humanizeAmount / 100, 0, 1);
+      playBassNotes(bassNotes, beatMs, {
+        velocity: beatAccent,
+        accent: beatAccent,
+        humanize: true,
+        humanizeAmount: humanizeDepth,
+      });
     }
   }
 }
@@ -3371,7 +3571,7 @@ function selectChord(index: number): void {
 
   if (chosen) {
     if (state.settings.alwaysPlayChords || !performPlaying) {
-      playChordPreview(chosen);
+      playChordPreview(chosen, { velocity: 1, humanize: false });
     }
   }
 
@@ -3539,6 +3739,9 @@ function buildSavedLoopRecord(state: AppState, id: string, name: string): SavedL
       timeSignature: state.settings.timeSignature,
       beatsPerChord: state.settings.beatsPerChord,
       swing: state.settings.swing,
+      humanizeAmount: state.settings.humanizeAmount,
+      accentStrength: state.settings.accentStrength,
+      layerWidth: state.settings.layerWidth,
       waveform: state.settings.waveform,
       effects: state.settings.effects,
       bassPreset: state.settings.bassPreset,
@@ -3963,6 +4166,36 @@ function bindPerformPanel(shell: HTMLElement): void {
       swingLabel.textContent = `Swing (${swing}%)`;
     }
     updateSettings({ swing }, `Swing set to ${swing}%`);
+  });
+
+  const humanizeInput = shell.querySelector<HTMLInputElement>("input[data-perform-setting='humanize-amount']");
+  const humanizeLabel = shell.querySelector<HTMLElement>("[data-live-label='humanize-amount']");
+  humanizeInput?.addEventListener("input", () => {
+    const humanizeAmount = normalizeHumanizeAmount(humanizeInput.value);
+    if (humanizeLabel) {
+      humanizeLabel.textContent = `Humanize (${humanizeAmount}%)`;
+    }
+    updateSettings({ humanizeAmount }, `Humanize set to ${humanizeAmount}%`);
+  });
+
+  const accentInput = shell.querySelector<HTMLInputElement>("input[data-perform-setting='accent-strength']");
+  const accentLabel = shell.querySelector<HTMLElement>("[data-live-label='accent-strength']");
+  accentInput?.addEventListener("input", () => {
+    const accentStrength = normalizeAccentStrength(accentInput.value);
+    if (accentLabel) {
+      accentLabel.textContent = `Accent Strength (${accentStrength}%)`;
+    }
+    updateSettings({ accentStrength }, `Accent strength set to ${accentStrength}%`);
+  });
+
+  const layerWidthInput = shell.querySelector<HTMLInputElement>("input[data-perform-setting='layer-width']");
+  const layerWidthLabel = shell.querySelector<HTMLElement>("[data-live-label='layer-width']");
+  layerWidthInput?.addEventListener("input", () => {
+    const layerWidth = normalizeLayerWidth(layerWidthInput.value);
+    if (layerWidthLabel) {
+      layerWidthLabel.textContent = `Layer Width (${layerWidth}%)`;
+    }
+    updateSettings({ layerWidth }, `Layer width set to ${layerWidth}%`);
   });
 
   const waveformSelect = shell.querySelector<HTMLSelectElement>("select[data-perform-setting='waveform']");
@@ -4420,6 +4653,18 @@ function render(): void {
     if (swingLabel) swingLabel.textContent = `Swing (${s.swing}%)`;
     const swingInput = root.querySelector<HTMLInputElement>("input[data-perform-setting='swing']");
     if (swingInput && swingInput.value !== String(s.swing)) swingInput.value = String(s.swing);
+    const humanizeLabel = root.querySelector<HTMLElement>("[data-live-label='humanize-amount']");
+    if (humanizeLabel) humanizeLabel.textContent = `Humanize (${s.humanizeAmount}%)`;
+    const humanizeInput = root.querySelector<HTMLInputElement>("input[data-perform-setting='humanize-amount']");
+    if (humanizeInput && humanizeInput.value !== String(s.humanizeAmount)) humanizeInput.value = String(s.humanizeAmount);
+    const accentLabel = root.querySelector<HTMLElement>("[data-live-label='accent-strength']");
+    if (accentLabel) accentLabel.textContent = `Accent Strength (${s.accentStrength}%)`;
+    const accentInput = root.querySelector<HTMLInputElement>("input[data-perform-setting='accent-strength']");
+    if (accentInput && accentInput.value !== String(s.accentStrength)) accentInput.value = String(s.accentStrength);
+    const layerWidthLabel = root.querySelector<HTMLElement>("[data-live-label='layer-width']");
+    if (layerWidthLabel) layerWidthLabel.textContent = `Layer Width (${s.layerWidth}%)`;
+    const layerWidthInput = root.querySelector<HTMLInputElement>("input[data-perform-setting='layer-width']");
+    if (layerWidthInput && layerWidthInput.value !== String(s.layerWidth)) layerWidthInput.value = String(s.layerWidth);
     const savedLoopNameInput = root.querySelector<HTMLInputElement>("input[data-saved-loop-input='name']");
     if (savedLoopNameInput && savedLoopNameInput.value !== state.savedLoopDraft) {
       savedLoopNameInput.value = state.savedLoopDraft;
