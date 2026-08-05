@@ -21,7 +21,7 @@
             4,
             8
           ],
-          "root": null
+          "root": "D"
         },
         {
           "numeral": "iii",
@@ -31,7 +31,7 @@
             4,
             8
           ],
-          "root": null
+          "root": "E"
         },
         {
           "numeral": "IV",
@@ -41,7 +41,7 @@
             5,
             8
           ],
-          "root": null
+          "root": "F"
         },
         {
           "numeral": "V",
@@ -51,7 +51,7 @@
             5,
             8
           ],
-          "root": null
+          "root": "G"
         },
         {
           "numeral": "vi",
@@ -61,7 +61,7 @@
             4,
             8
           ],
-          "root": null
+          "root": "A"
         },
         {
           "numeral": "vii",
@@ -71,7 +71,7 @@
             4,
             7
           ],
-          "root": null
+          "root": "B"
         }
       ]
     },
@@ -87,7 +87,7 @@
             8,
             11
           ],
-          "root": null
+          "root": "A"
         },
         {
           "numeral": "V/iii",
@@ -98,7 +98,7 @@
             8,
             11
           ],
-          "root": null
+          "root": "B"
         },
         {
           "numeral": "V/IV",
@@ -109,7 +109,7 @@
             8,
             11
           ],
-          "root": null
+          "root": "C"
         },
         {
           "numeral": "V/V",
@@ -131,7 +131,7 @@
             8,
             11
           ],
-          "root": null
+          "root": "E"
         },
         {
           "numeral": "V/vii",
@@ -142,7 +142,7 @@
             8,
             11
           ],
-          "root": null
+          "root": "F#"
         }
       ]
     },
@@ -157,17 +157,17 @@
             4,
             8
           ],
-          "root": null
+          "root": "C"
         },
         {
           "numeral": "iidim",
-          "full_name": "Dim",
+          "full_name": "Ddim",
           "intervals": [
             1,
-            3,
+            4,
             7
           ],
-          "root": null
+          "root": "D"
         },
         {
           "numeral": "bIII",
@@ -567,10 +567,20 @@
       "chords": [
         {
           "full_name": "C",
-          "intervals": [
-            1,
-            5,
-            8
+          "tones": [
+            "C",
+            "E",
+            "G"
+          ]
+        },
+        {
+          "full_name": "Ci1",
+          "tones": [
+            "E",
+            "G",
+            "C",
+            "E",
+            "E"
           ]
         }
       ]
