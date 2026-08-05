@@ -90,6 +90,7 @@ type AppState = {
   selectedFamilyIndex: number;
   selectedChordIndex: number;
   chordFanVisible: boolean;
+  showSelectedRomanNumeral: boolean;
   graph: LoopGraph;
   settings: AppSettings;
   savedLoops: SavedLoopRecord[];
@@ -1501,6 +1502,7 @@ const store = createStore<AppState>(() => ({
   selectedFamilyIndex: initialSelectedFamilyIndex,
   selectedChordIndex: initialSelectedChordIndex,
   chordFanVisible: persistedInteraction.chordFanVisible === true,
+  showSelectedRomanNumeral: false,
   graph: startingGraph,
   settings: initialSettings,
   savedLoops: initialSavedLoops,
@@ -2122,7 +2124,7 @@ function overlay(rootEl: HTMLElement, state: AppState, layout: StageLayout, geom
           ${performPlaying ? "❚❚" : "▶"}
         </button>
       </div>
-      <div class="central-tone-badge" aria-label="Progression and central tone">
+      <div class="central-tone-badge" aria-label="Progression and central tone" role="button" tabindex="0" title="Focus selected chord in ring">
         <span class="central-tone-label">${escapeHtml(progressionName)}</span>
         <span class="central-tone-value">${escapeHtml(state.settings.centralTone)}</span>
       </div>
@@ -2347,10 +2349,17 @@ function buildSavedLoopsPanel(state: AppState): string {
   `;
 }
 
+function selectedRingRomanNumeral(state: AppState): string | null {
+  return getSelectedChord(state).numeral?.trim() || null;
+}
+
 function buildOverlayContent(state: AppState, layout: StageLayout, geometry: SceneGeometry): string {
   const selectedChord = getSelectedChord(state);
   const family = getSelectedChordFamily(state);
   const selectedNode = state.graph.nodes[state.graph.selectedNodeId];
+  const majorLabel = state.showSelectedRomanNumeral
+    ? (selectedRingRomanNumeral(state) ?? bandLabel(family.name))
+    : bandLabel(family.name);
   const nodeViews = buildGraphNodeViews(state, layout);
   const selectedView = nodeViews.find((view) => view.isSelected);
   const activeCenterX = selectedView?.x ?? layout.centerX;
@@ -2365,7 +2374,10 @@ function buildOverlayContent(state: AppState, layout: StageLayout, geometry: Sce
       .map((seg, index) => {
         const point = segmentMidpoint(layout, seg, activeCenterX, activeCenterY);
         const chord = family.chords[index];
-        const label = chordLabel(chord?.full_name ?? chord?.numeral ?? "I");
+        const labelSource = state.showSelectedRomanNumeral
+          ? (chord?.numeral ?? chord?.full_name ?? "I")
+          : (chord?.full_name ?? chord?.numeral ?? "I");
+        const label = chordLabel(labelSource);
         return `<span class="label chord" style="left:${point.x}px;top:${point.y}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(label)}</span>`;
       })
       .join("")
@@ -2388,7 +2400,7 @@ function buildOverlayContent(state: AppState, layout: StageLayout, geometry: Sce
 
   return `
     <span class="label center" style="left:${activeCenterX}px;top:${activeCenterY}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(chordLabel(selectedNode?.chordName ?? selectedChord.full_name))}</span>
-    <span class="label major" style="left:${activeCenterX}px;top:${activeCenterY - layout.centerRadius + 24}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(bandLabel(family.name))}</span>
+    <span class="label major" style="left:${activeCenterX}px;top:${activeCenterY - layout.centerRadius + 24}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(majorLabel)}</span>
     ${chordLabels}
     ${familyLabels}
     ${showAddAction ? `<span class="label action plus" style="left:${addX}px;top:${addY}px">${escapeHtml(addSymbol)}</span>` : ""}
@@ -3238,7 +3250,10 @@ function drawFallback2d(
 
     chordSegments.forEach((seg, index) => {
       const chord = nodeFamily.chords[index];
-      const label = chordLabel(chord?.full_name ?? chord?.numeral ?? "I");
+      const labelSource = state.showSelectedRomanNumeral
+        ? (chord?.numeral ?? chord?.full_name ?? "I")
+        : (chord?.full_name ?? chord?.numeral ?? "I");
+      const label = chordLabel(labelSource);
       const point = segmentMidpoint(layout, seg, view.x, view.y);
       ctx.fillStyle = "rgba(139, 182, 255, 0.88)";
       ctx.font = `500 ${chordFontPx}px 'Cormorant Garamond', serif`;
@@ -3685,6 +3700,32 @@ function bindCornerControls(shell: HTMLElement): void {
   const settingsBtn = shell.querySelector<HTMLButtonElement>(".corner-btn[data-action='settings']");
   const savedLoopsBtn = shell.querySelector<HTMLButtonElement>(".corner-btn[data-action='saved-loops']");
   const performBtn = shell.querySelector<HTMLButtonElement>(".corner-btn[data-action='perform']");
+  const centralToneBadge = shell.querySelector<HTMLElement>(".central-tone-badge");
+
+  const focusSelectedChordInRing = () => {
+    const state = store.getState();
+    const toggledShowRoman = !state.showSelectedRomanNumeral;
+    const numeral = selectedRingRomanNumeral(state) ?? "current harmony";
+    const status = toggledShowRoman
+      ? `Focused ring as ${numeral}`
+      : "Focused ring as chord names";
+
+    store.setState({
+      ...state,
+      chordFanVisible: true,
+      showSelectedRomanNumeral: toggledShowRoman,
+      status,
+    });
+  };
+
+  centralToneBadge?.addEventListener("click", focusSelectedChordInRing);
+  centralToneBadge?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault();
+    focusSelectedChordInRing();
+  });
 
   settingsBtn?.addEventListener("click", () => {
     const state = store.getState();

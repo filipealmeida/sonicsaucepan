@@ -14,6 +14,7 @@
         "git fetch": true,
         "git rebase": true,
         "npm run build": true,
-        "npm run dev": true
+        "npm run dev": true,
+        "npm --prefix /home/f/sandbox/sonicsaucepan/frontend": true
     }
 }

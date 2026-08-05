@@ -116,6 +116,12 @@ body {
     0 10px 26px rgba(0, 0, 0, 0.4),
     inset 0 1px 0 rgba(255, 225, 170, 0.12);
   backdrop-filter: blur(8px);
+  cursor: pointer;
+}
+
+.central-tone-badge:focus-visible {
+  outline: 2px solid rgba(255, 214, 140, 0.82);
+  outline-offset: 2px;
 }
 
 .central-tone-label {
