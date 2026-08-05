@@ -2387,8 +2387,6 @@ function buildOverlayContent(state: AppState, layout: StageLayout, geometry: Sce
   const removeSymbol = actionSymbols?.remove ?? "-";
 
   return `
-    <div class="circuit circuit-left"></div>
-    <div class="circuit circuit-right"></div>
     <span class="label center" style="left:${activeCenterX}px;top:${activeCenterY}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(chordLabel(selectedNode?.chordName ?? selectedChord.full_name))}</span>
     <span class="label major" style="left:${activeCenterX}px;top:${activeCenterY - layout.centerRadius + 24}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(bandLabel(family.name))}</span>
     ${chordLabels}
