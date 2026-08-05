@@ -18,8 +18,34 @@ type ChordCatalog = {
   families: ChordFamily[];
 };
 
+type GraphNodeType = "chord-selection";
+
+type GraphNodeAction = "add-after" | "remove-selected" | "cycle-selection";
+
+type GraphNodeRenderStyle = {
+  edgeStroke: string;
+  edgeArrowFill: string;
+  returnStroke: string;
+  returnArrowFill: string;
+  nodeStroke: string;
+  headNodeStroke: string;
+  nodeTextFill: string;
+};
+
+type GraphNodeTypeConfig = {
+  label: string;
+  icon: string;
+  allowedActions: GraphNodeAction[];
+  actionSymbols: {
+    add: string;
+    remove: string;
+  };
+  renderStyle: GraphNodeRenderStyle;
+};
+
 type GraphNode = {
   id: number;
+  type: GraphNodeType;
   chordName: string;
   nextId: number;
 };
@@ -31,6 +57,31 @@ type LoopGraph = {
   nodes: Record<number, GraphNode>;
 };
 
+type SavedLoopRecord = {
+  id: string;
+  name: string;
+  graph: LoopGraph;
+  selectedFamilyIndex: number;
+  selectedChordIndex: number;
+  chordFanVisible: boolean;
+  sceneZoom: number;
+  scenePan: { x: number; y: number };
+  nodeOffsets: Record<number, { x: number; y: number }>;
+  settings: {
+    centralTone: string;
+    bpm: number;
+    timeSignature: TimeSignatureOption;
+    swing: number;
+    waveform: WaveformOption;
+    effects: EffectOption;
+    midiEnabled: boolean;
+    midiPortId: string;
+    midiChannel: number;
+    debugFooterEnabled: boolean;
+  };
+  updatedAt: string;
+};
+
 type AppState = {
   catalog: ChordCatalog;
   selectedFamilyIndex: number;
@@ -38,8 +89,10 @@ type AppState = {
   chordFanVisible: boolean;
   graph: LoopGraph;
   settings: AppSettings;
+  savedLoops: SavedLoopRecord[];
   savedLoopDraft: string;
-  savedLoopSelectedIndex: number;
+  savedLoopSelectedId: string | null;
+  savedLoopsPage: number;
   debugInput: string;
   debugLogs: string[];
   status: string;
@@ -117,9 +170,11 @@ type SceneGeometry = {
 
 const STORAGE_KEY = "sonic-saucepan-session-graph-v1";
 const SETTINGS_STORAGE_KEY = "sonic-saucepan-settings-v1";
+const INTERACTION_STORAGE_KEY = "sonic-saucepan-interaction-v1";
+const SAVED_LOOPS_STORAGE_KEY = "sonic-saucepan-saved-loops-v1";
+const SAVED_LOOPS_PAGE_SIZE = 8;
 const MAX_SEGMENTS = 16;
 const CATALOG_TEMPLATE = catalogJson as ChordCatalog;
-const NODE_MANIPULATION_ENABLED = false;
 const CENTRAL_TONES = [
   "A",
   "A#",
@@ -147,13 +202,27 @@ const WAVEFORMS: WaveformOption[] = ["sine", "triangle", "sawtooth", "square"];
 const TIME_SIGNATURES: TimeSignatureOption[] = ["4/4", "3/4", "6/8"];
 const EFFECT_OPTIONS: EffectOption[] = ["none", "delay", "chorus"];
 const MAX_DEBUG_LOGS = 220;
-const DUMMY_SAVED_PROGRESSIONS = [
-  "Neon Cadence",
-  "Glass Harbor",
-  "Sunline Lift",
-  "Midnight Pivot",
-  "Amber Return",
-] as const;
+
+const GRAPH_NODE_TYPE_REGISTRY: Record<GraphNodeType, GraphNodeTypeConfig> = {
+  "chord-selection": {
+    label: "Chord Selection",
+    icon: "C",
+    allowedActions: ["add-after", "remove-selected", "cycle-selection"],
+    actionSymbols: {
+      add: "+",
+      remove: "-",
+    },
+    renderStyle: {
+      edgeStroke: "rgba(122, 204, 255, 0.88)",
+      edgeArrowFill: "rgba(160, 223, 255, 0.96)",
+      returnStroke: "rgba(255, 210, 126, 0.96)",
+      returnArrowFill: "rgba(255, 209, 130, 0.98)",
+      nodeStroke: "rgba(106, 165, 255, 0.78)",
+      headNodeStroke: "rgba(255, 210, 130, 0.9)",
+      nodeTextFill: "rgba(149, 198, 255, 0.95)",
+    },
+  },
+};
 
 type MidiOutputLike = {
   id: string;
@@ -168,6 +237,10 @@ type MidiAccessLike = {
     values?: () => Iterator<MidiOutputLike>;
   };
   onstatechange: ((event: Event) => void) | null;
+};
+
+type MidiRequestOptions = {
+  sysex?: boolean;
 };
 
 const root = document.getElementById("app");
@@ -193,9 +266,43 @@ function createInitialGraph(initialChord: string): LoopGraph {
     selectedNodeId: 0,
     nextNodeId: 1,
     nodes: {
-      0: { id: 0, chordName: initialChord, nextId: 0 },
+      0: { id: 0, type: "chord-selection", chordName: initialChord, nextId: 0 },
     },
   };
+}
+
+function graphNodeTypeConfig(type: GraphNodeType): GraphNodeTypeConfig {
+  return GRAPH_NODE_TYPE_REGISTRY[type];
+}
+
+function graphNodeTypeAllowsAction(type: GraphNodeType, action: GraphNodeAction): boolean {
+  return graphNodeTypeConfig(type).allowedActions.includes(action);
+}
+
+function selectedGraphNode(state: AppState): GraphNode | null {
+  return state.graph.nodes[state.graph.selectedNodeId] ?? null;
+}
+
+function selectedNodeAllowsAction(state: AppState, action: GraphNodeAction): boolean {
+  const node = selectedGraphNode(state);
+  if (!node) {
+    return false;
+  }
+  if (action === "remove-selected") {
+    const nodeCount = graphSequence(state.graph).length;
+    if (nodeCount <= 1) {
+      return false;
+    }
+  }
+  return graphNodeTypeAllowsAction(node.type, action);
+}
+
+function selectedNodeActionSymbols(state: AppState): { add: string; remove: string } | null {
+  const node = selectedGraphNode(state);
+  if (!node) {
+    return null;
+  }
+  return graphNodeTypeConfig(node.type).actionSymbols;
 }
 
 function graphSequence(graph: LoopGraph, maxSteps = 128): GraphNode[] {
@@ -237,13 +344,14 @@ function addAfterSelected(graph: LoopGraph, chordName: string): LoopGraph {
   const newId = graph.nextNodeId;
   return {
     ...graph,
-    selectedNodeId: selected.id,
+    selectedNodeId: newId,
     nextNodeId: newId + 1,
     nodes: {
       ...graph.nodes,
       [selected.id]: { ...selected, nextId: newId },
       [newId]: {
         id: newId,
+        type: selected.type,
         chordName,
         nextId: selected.nextId,
       },
@@ -252,7 +360,7 @@ function addAfterSelected(graph: LoopGraph, chordName: string): LoopGraph {
 }
 
 function removeSelected(graph: LoopGraph): LoopGraph {
-  if (graph.selectedNodeId === graph.headId) {
+  if (Object.keys(graph.nodes).length <= 1) {
     return graph;
   }
 
@@ -275,7 +383,8 @@ function removeSelected(graph: LoopGraph): LoopGraph {
 
   return {
     ...graph,
-    selectedNodeId: predecessor.id,
+    headId: target.id === graph.headId ? target.nextId : graph.headId,
+    selectedNodeId: target.id === graph.headId ? target.nextId : predecessor.id,
     nodes: updatedNodes,
   };
 }
@@ -334,10 +443,15 @@ function describeArcSegment(
   };
 }
 
-function segmentMidpoint(layout: StageLayout, segment: Segment): { x: number; y: number } {
+function segmentMidpoint(
+  layout: StageLayout,
+  segment: Segment,
+  centerX = layout.centerX,
+  centerY = layout.centerY,
+): { x: number; y: number } {
   const angle = (segment.start + segment.end) * 0.5;
   const radius = (segment.inner + segment.outer) * 0.5;
-  return describeArcSegment(layout.centerX, layout.centerY, radius, angle);
+  return describeArcSegment(centerX, centerY, radius, angle);
 }
 
 function shorthand(name: string): string {
@@ -403,7 +517,7 @@ function findChordInCatalog(
 
 function loadSavedGraph(): LoopGraph | null {
   try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) ?? sessionStorage.getItem(STORAGE_KEY);
     if (!raw) {
       return null;
     }
@@ -414,7 +528,17 @@ function loadSavedGraph(): LoopGraph | null {
     if (!parsed.nodes[parsed.headId]) {
       return null;
     }
-    return parsed;
+    const selectedNodeId = typeof parsed.selectedNodeId === "number" && parsed.nodes[parsed.selectedNodeId]
+      ? parsed.selectedNodeId
+      : parsed.headId;
+    const nextNodeId = typeof parsed.nextNodeId === "number"
+      ? parsed.nextNodeId
+      : (Math.max(...Object.keys(parsed.nodes).map((value) => Number(value))) + 1);
+    return {
+      ...parsed,
+      selectedNodeId,
+      nextNodeId,
+    };
   } catch {
     return null;
   }
@@ -422,10 +546,143 @@ function loadSavedGraph(): LoopGraph | null {
 
 function saveGraph(graph: LoopGraph): void {
   try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(graph));
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(graph));
   } catch {
     // ignore storage errors
   }
+}
+
+type PersistedInteractionState = {
+  selectedFamilyIndex?: number;
+  selectedChordIndex?: number;
+  chordFanVisible?: boolean;
+  sceneZoom?: number;
+  scenePan?: { x?: number; y?: number };
+  nodeOffsets?: Record<string, { x?: number; y?: number }>;
+  savedLoopSelectedId?: string | null;
+  savedLoopDraft?: string;
+  savedLoopsPage?: number;
+};
+
+function loadInteractionState(): PersistedInteractionState {
+  try {
+    const raw = localStorage.getItem(INTERACTION_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as PersistedInteractionState;
+    return parsed ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function loadSavedLoops(): SavedLoopRecord[] {
+  try {
+    const raw = localStorage.getItem(SAVED_LOOPS_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as SavedLoopRecord[];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((loop) => loop && typeof loop.id === "string" && typeof loop.name === "string");
+  } catch {
+    return [];
+  }
+}
+
+function saveSavedLoops(loops: SavedLoopRecord[]): void {
+  try {
+    localStorage.setItem(SAVED_LOOPS_STORAGE_KEY, JSON.stringify(loops));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function randomLoopName(): string {
+  const adjectives = [
+    "agile",
+    "bold",
+    "brisk",
+    "calm",
+    "daring",
+    "eager",
+    "fuzzy",
+    "lively",
+    "mellow",
+    "nimble",
+    "plucky",
+    "quiet",
+    "rapid",
+    "steady",
+    "vivid",
+    "witty",
+  ];
+  const names = [
+    "archimedes",
+    "babbage",
+    "curie",
+    "davinci",
+    "einstein",
+    "galileo",
+    "hopper",
+    "lovelace",
+    "newton",
+    "tesla",
+    "turing",
+    "noether",
+    "fermi",
+    "bohr",
+    "kepler",
+    "franklin",
+  ];
+  const a = adjectives[Math.floor(Math.random() * adjectives.length)];
+  const b = names[Math.floor(Math.random() * names.length)];
+  return `${a}_${b}`;
+}
+
+function cloneGraph(graph: LoopGraph): LoopGraph {
+  return JSON.parse(JSON.stringify(graph)) as LoopGraph;
+}
+
+function currentLoopStateSignature(state: AppState): string {
+  return JSON.stringify({
+    graph: state.graph,
+    selectedFamilyIndex: state.selectedFamilyIndex,
+    selectedChordIndex: state.selectedChordIndex,
+    chordFanVisible: state.chordFanVisible,
+    sceneZoom,
+    scenePan,
+    nodeOffsets,
+    settings: {
+      centralTone: state.settings.centralTone,
+      bpm: state.settings.bpm,
+      timeSignature: state.settings.timeSignature,
+      swing: state.settings.swing,
+      waveform: state.settings.waveform,
+      effects: state.settings.effects,
+      midiEnabled: state.settings.midiEnabled,
+      midiPortId: state.settings.midiPortId,
+      midiChannel: state.settings.midiChannel,
+      debugFooterEnabled: state.settings.debugFooterEnabled,
+    },
+  });
+}
+
+let activeSavedLoopId: string | null = null;
+let activeSavedLoopSignature = "";
+let restoreSavedLoopNameFocus = false;
+let savedLoopNameCursor = 0;
+
+function shouldPromptToSaveCurrent(state: AppState): boolean {
+  if (graphSequence(state.graph).length <= 1) {
+    return false;
+  }
+  const signature = currentLoopStateSignature(state);
+  return signature !== activeSavedLoopSignature;
 }
 
 function defaultSettings(): AppSettings {
@@ -844,8 +1101,8 @@ function sendMidiPreview(chord: ChordEntry): void {
   }, 920);
 }
 
-function playChordPreview(chord: ChordEntry): void {
-  triggerCenterPulse();
+function playChordPreview(chord: ChordEntry, pulseNodeId?: number): void {
+  triggerCenterPulse(pulseNodeId);
 
   const state = store.getState();
   const waveform = state.settings.waveform;
@@ -919,16 +1176,25 @@ async function ensureMidiAccess(): Promise<MidiAccessLike | null> {
   }
 
   const nav = navigator as Navigator & {
-    requestMIDIAccess?: () => Promise<MidiAccessLike>;
+    requestMIDIAccess?: (options?: MidiRequestOptions) => Promise<MidiAccessLike>;
   };
   if (!nav.requestMIDIAccess) {
+    appendDebugLog("[midi] navigator.requestMIDIAccess is unavailable in this browser");
     return null;
   }
 
   try {
-    midiAccessRef = await nav.requestMIDIAccess();
+    // Some browsers are picky about options; prefer explicit non-sysex, then fallback.
+    try {
+      midiAccessRef = await nav.requestMIDIAccess({ sysex: false });
+    } catch {
+      midiAccessRef = await nav.requestMIDIAccess();
+    }
+    appendDebugLog("[midi] MIDI access granted");
     return midiAccessRef;
-  } catch {
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    appendDebugLog(`[midi] MIDI access failed: ${detail}`);
     return null;
   }
 }
@@ -946,8 +1212,9 @@ async function refreshMidiPorts(): Promise<void> {
     store.setState({
       ...state,
       settings,
-      status: "Web MIDI is unavailable in this browser",
+      status: "Web MIDI unavailable. In Firefox on Linux, enable dom.webmidi.enabled in about:config and reload.",
     });
+    appendDebugLog("[midi] Web MIDI unavailable. On Firefox/Linux enable dom.webmidi.enabled and reload.");
     return;
   }
 
@@ -981,6 +1248,15 @@ async function refreshMidiPorts(): Promise<void> {
     ...state,
     settings,
   });
+  appendDebugLog(`[midi] Refreshed ${ports.length} MIDI output port${ports.length === 1 ? "" : "s"}`);
+
+  if (ports.length === 0) {
+    store.setState({
+      ...store.getState(),
+      status: "No MIDI outputs detected. On Firefox/Linux, verify Web MIDI is enabled and a port is exposed.",
+    });
+    appendDebugLog("[midi] No MIDI output ports detected");
+  }
 
   if (!midiStateListenerBound) {
     access.onstatechange = () => {
@@ -992,24 +1268,69 @@ async function refreshMidiPorts(): Promise<void> {
 
 const initialSettings = loadSettings();
 const initialCatalog = transposeCatalogForCentralTone(CATALOG_TEMPLATE, initialSettings.centralTone);
-const savedGraph = null;
-const startingGraph = createInitialGraph(initialChordName(initialCatalog));
+const savedGraph = loadSavedGraph();
+const startingGraph = savedGraph ?? createInitialGraph(initialChordName(initialCatalog));
+const persistedInteraction = loadInteractionState();
+const initialSavedLoops = loadSavedLoops();
 const initialSelectedNode =
   startingGraph.nodes[startingGraph.selectedNodeId] ??
   startingGraph.nodes[startingGraph.headId];
 const initialSelection = initialSelectedNode
   ? findChordInCatalog(initialCatalog, initialSelectedNode.chordName)
   : null;
+const initialSelectedFamilyIndex = clamp(
+  Number.isFinite(persistedInteraction.selectedFamilyIndex)
+    ? Number(persistedInteraction.selectedFamilyIndex)
+    : (initialSelection?.familyIndex ?? 0),
+  0,
+  Math.max(0, initialCatalog.families.length - 1),
+);
+const initialSelectedChordIndex = clamp(
+  Number.isFinite(persistedInteraction.selectedChordIndex)
+    ? Number(persistedInteraction.selectedChordIndex)
+    : (initialSelection?.chordIndex ?? 0),
+  0,
+  Math.max(0, (initialCatalog.families[initialSelectedFamilyIndex]?.chords.length ?? 1) - 1),
+);
+const initialSceneZoom = clamp(Number(persistedInteraction.sceneZoom) || 1, 0.30, 1.85);
+const initialScenePan = {
+  x: Number(persistedInteraction.scenePan?.x) || 0,
+  y: Number(persistedInteraction.scenePan?.y) || 0,
+};
+const initialNodeOffsets: Record<number, { x: number; y: number }> = {};
+for (const [nodeIdText, offset] of Object.entries(persistedInteraction.nodeOffsets ?? {})) {
+  const nodeId = Number(nodeIdText);
+  if (!Number.isFinite(nodeId)) {
+    continue;
+  }
+  initialNodeOffsets[nodeId] = {
+    x: Number(offset?.x) || 0,
+    y: Number(offset?.y) || 0,
+  };
+}
+const persistedSavedLoopSelectedId =
+  typeof persistedInteraction.savedLoopSelectedId === "string"
+  && initialSavedLoops.some((loop) => loop.id === persistedInteraction.savedLoopSelectedId)
+    ? persistedInteraction.savedLoopSelectedId
+    : null;
 
 const store = createStore<AppState>(() => ({
   catalog: initialCatalog,
-  selectedFamilyIndex: initialSelection?.familyIndex ?? 0,
-  selectedChordIndex: initialSelection?.chordIndex ?? 0,
-  chordFanVisible: false,
+  selectedFamilyIndex: initialSelectedFamilyIndex,
+  selectedChordIndex: initialSelectedChordIndex,
+  chordFanVisible: persistedInteraction.chordFanVisible === true,
   graph: startingGraph,
   settings: initialSettings,
-  savedLoopDraft: "",
-  savedLoopSelectedIndex: 0,
+  savedLoops: initialSavedLoops,
+  savedLoopDraft: typeof persistedInteraction.savedLoopDraft === "string"
+    ? persistedInteraction.savedLoopDraft
+    : randomLoopName(),
+  savedLoopSelectedId: persistedSavedLoopSelectedId,
+  savedLoopsPage: clamp(
+    Number(persistedInteraction.savedLoopsPage) || 0,
+    0,
+    Math.max(0, Math.ceil(initialSavedLoops.length / SAVED_LOOPS_PAGE_SIZE) - 1),
+  ),
   debugInput: "",
   debugLogs: ["[system] Debug footer initialized"],
   status: "Initial state ready",
@@ -1028,6 +1349,26 @@ function appendDebugLog(message: string): void {
     ...state,
     debugLogs: nextLogs,
   });
+}
+
+function saveInteractionState(): void {
+  try {
+    const state = store.getState();
+    const payload: PersistedInteractionState = {
+      selectedFamilyIndex: state.selectedFamilyIndex,
+      selectedChordIndex: state.selectedChordIndex,
+      chordFanVisible: state.chordFanVisible,
+      sceneZoom,
+      scenePan,
+      nodeOffsets,
+      savedLoopSelectedId: state.savedLoopSelectedId,
+      savedLoopDraft: state.savedLoopDraft,
+      savedLoopsPage: state.savedLoopsPage,
+    };
+    localStorage.setItem(INTERACTION_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // ignore storage errors
+  }
 }
 
 function updateSettings(patch: Partial<AppSettings>, status?: string): void {
@@ -1083,11 +1424,11 @@ function buildLayout(width: number, height: number): StageLayout {
     centerRadius,
     familyInner: centerRadius + minAxis * 0.02 * scale,
     familyOuter: centerRadius + minAxis * 0.13 * scale,
-    addX: centerX + centerRadius + minAxis * 0.11 * scale,
-    addY: centerY - minAxis * 0.085 * scale,
-    removeX: centerX + centerRadius + minAxis * 0.074 * scale,
-    removeY: centerY - minAxis * 0.024 * scale,
-    actionRadius: minAxis * 0.024 * scale,
+    addX: centerX + centerRadius * 0.48,
+    addY: centerY + centerRadius * 0.45,
+    removeX: centerX - centerRadius * 0.48,
+    removeY: centerY + centerRadius * 0.45,
+    actionRadius: Math.max(10, minAxis * 0.02 * scale),
   };
 }
 
@@ -1561,7 +1902,7 @@ class WebGlStage {
       this.uniforms.removeCircle,
       this.currentLayout.removeX * dpr,
       this.currentLayout.removeY * dpr,
-      this.currentLayout.actionRadius * 0.78 * dpr,
+      this.currentLayout.actionRadius * 0.88 * dpr,
     );
 
     gl.uniform1f(this.uniforms.removeDisabled, this.removeDisabled);
@@ -1581,10 +1922,12 @@ function overlay(rootEl: HTMLElement, state: AppState, layout: StageLayout, geom
 
   const selectedChord = getSelectedChord(state);
   const family = getSelectedChordFamily(state);
-  const selectedNode = state.graph.nodes[state.graph.selectedNodeId];
+  const selectedNode = selectedGraphNode(state);
   const nodeCount = graphSequence(state.graph).length;
+  const selectedNodeTypeLabel = selectedNode ? graphNodeTypeConfig(selectedNode.type).label : "Node";
 
   const overlayContent = buildOverlayContent(state, layout, geometry);
+  const progressionName = state.savedLoopDraft.trim() || "untitled_loop";
 
   const status = escapeHtml(state.status);
   rootEl.innerHTML = `
@@ -1592,15 +1935,19 @@ function overlay(rootEl: HTMLElement, state: AppState, layout: StageLayout, geom
       <canvas class="webgl-stage" aria-label="Sonic Saucepan canvas stage"></canvas>
       <div class="corner-controls" role="toolbar" aria-label="Loop controls">
         <button class="corner-btn" data-action="settings" aria-label="Settings" title="Settings">⚙</button>
-        <button class="corner-btn" data-action="saved-loops" aria-label="Saved loops" title="Saved loops">⟳</button>
+        <button class="corner-btn" data-action="saved-loops" aria-label="Saved loops" title="Saved loops">📖</button>
         <button class="corner-btn perform ${performPlaying ? "playing" : "paused"}" data-action="perform" aria-label="Perform" title="Perform">
           ${performPlaying ? "❚❚" : "▶"}
         </button>
       </div>
+      <div class="central-tone-badge" aria-label="Progression and central tone">
+        <span class="central-tone-label">${escapeHtml(progressionName)}</span>
+        <span class="central-tone-value">${escapeHtml(state.settings.centralTone)}</span>
+      </div>
       <div class="hud">
         <div class="hud-title">Sonic Saucepan</div>
-        <div class="hud-copy">Tap a ring to change the family or chord. Tap <span>+</span> to add the selected chord and <span>×</span> to remove the selected node.</div>
-        <div class="hud-meta">${escapeHtml(`${nodeCount} nodes · ${family.chords.length} chords`)}</div>
+        <div class="hud-copy">Tap a ring to change the family or chord. Use the inner <span>+</span> and <span>-</span> controls to add or remove chord-selection nodes.</div>
+        <div class="hud-meta">${escapeHtml(`${nodeCount} nodes · ${family.chords.length} chords · ${selectedNodeTypeLabel}`)}</div>
       </div>
       <div class="overlay" aria-hidden="true">
         ${overlayContent}
@@ -1746,14 +2093,19 @@ function buildPerformPanel(state: AppState): string {
 
 function buildSavedLoopsPanel(state: AppState): string {
   const settings = state.settings;
-  const rows = DUMMY_SAVED_PROGRESSIONS
-    .map((name, index) => {
-      const selected = index === state.savedLoopSelectedIndex;
+  const pageCount = Math.max(1, Math.ceil(state.savedLoops.length / SAVED_LOOPS_PAGE_SIZE));
+  const page = clamp(state.savedLoopsPage, 0, pageCount - 1);
+  const pageStart = page * SAVED_LOOPS_PAGE_SIZE;
+  const pageLoops = state.savedLoops.slice(pageStart, pageStart + SAVED_LOOPS_PAGE_SIZE);
+  const rows = pageLoops
+    .map((loop, pageOffset) => {
+      const index = pageStart + pageOffset;
+      const selected = loop.id === state.savedLoopSelectedId;
       return `
         <li>
-          <button class="saved-loop-item ${selected ? "active" : ""}" data-saved-loop-index="${index}" type="button" aria-pressed="${selected ? "true" : "false"}">
+          <button class="saved-loop-item ${selected ? "active" : ""}" data-saved-loop-id="${escapeAttr(loop.id)}" type="button" aria-pressed="${selected ? "true" : "false"}">
             <span class="saved-loop-position">${index + 1}</span>
-            <span class="saved-loop-name">${escapeHtml(name)}</span>
+            <span class="saved-loop-name">${escapeHtml(loop.name)}</span>
           </button>
         </li>
       `;
@@ -1773,11 +2125,21 @@ function buildSavedLoopsPanel(state: AppState): string {
             <span>Loop Name</span>
             <input type="text" value="${escapeAttr(state.savedLoopDraft)}" placeholder="Type loop name" data-saved-loop-input="name" />
           </label>
+          <div class="saved-loop-actions">
+            <button class="saved-loop-save-btn" data-saved-loops-action="save" type="button">Save Current State</button>
+            <button class="saved-loop-reset-btn" data-saved-loops-action="reset-state" type="button">Reset To Initial Node</button>
+          </div>
           <div class="saved-loop-list-wrap">
             <span class="saved-loop-label">Saved Progressions</span>
-            <ol class="saved-loop-list">${rows}</ol>
+            <ol class="saved-loop-list">${rows || `<li class="saved-loop-empty">No saved loops yet</li>`}</ol>
           </div>
-          <div class="saved-loop-index">Index ${state.savedLoopSelectedIndex + 1} / ${DUMMY_SAVED_PROGRESSIONS.length}</div>
+          <div class="saved-loop-pages" aria-label="Saved loops pages">
+            ${Array.from({ length: pageCount }, (_, index) => {
+              const active = index === page;
+              return `<button class="saved-loop-page-btn ${active ? "active" : ""}" data-saved-loops-page="${index}" type="button" aria-pressed="${active ? "true" : "false"}">${index + 1}</button>`;
+            }).join("")}
+          </div>
+          <div class="saved-loop-index">${state.savedLoops.length} saved loop${state.savedLoops.length === 1 ? "" : "s"} · page ${page + 1} / ${pageCount}</div>
         </div>
       </section>
     </div>
@@ -1788,11 +2150,19 @@ function buildOverlayContent(state: AppState, layout: StageLayout, geometry: Sce
   const selectedChord = getSelectedChord(state);
   const family = getSelectedChordFamily(state);
   const selectedNode = state.graph.nodes[state.graph.selectedNodeId];
+  const nodeViews = buildGraphNodeViews(state, layout);
+  const selectedView = nodeViews.find((view) => view.isSelected);
+  const activeCenterX = selectedView?.x ?? layout.centerX;
+  const activeCenterY = selectedView?.y ?? layout.centerY;
+  const addX = activeCenterX + layout.centerRadius * 0.48;
+  const addY = activeCenterY + layout.centerRadius * 0.45;
+  const removeX = activeCenterX - layout.centerRadius * 0.48;
+  const removeY = activeCenterY + layout.centerRadius * 0.45;
 
   const chordLabels = state.chordFanVisible
     ? geometry.chordSegments
       .map((seg, index) => {
-        const point = segmentMidpoint(layout, seg);
+        const point = segmentMidpoint(layout, seg, activeCenterX, activeCenterY);
         const chord = family.chords[index];
         const label = chordLabel(chord?.full_name ?? chord?.numeral ?? "I");
         return `<span class="label chord" style="left:${point.x}px;top:${point.y}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(label)}</span>`;
@@ -1802,27 +2172,34 @@ function buildOverlayContent(state: AppState, layout: StageLayout, geometry: Sce
 
   const familyLabels = geometry.familySegments
     .map((seg, index) => {
-      const point = segmentMidpoint(layout, seg);
+      const point = segmentMidpoint(layout, seg, activeCenterX, activeCenterY);
       const familyIndex = geometry.familyIndices[index] ?? 0;
       const label = shorthand(state.catalog.families[familyIndex]?.name ?? "Family");
       return `<span class="label family" style="left:${point.x}px;top:${point.y}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(label)}</span>`;
     })
     .join("");
 
+  const showAddAction = selectedNodeAllowsAction(state, "add-after");
+  const showRemoveAction = selectedNodeAllowsAction(state, "remove-selected");
+  const actionSymbols = selectedNodeActionSymbols(state);
+  const addSymbol = actionSymbols?.add ?? "+";
+  const removeSymbol = actionSymbols?.remove ?? "-";
+
   return `
     <div class="circuit circuit-left"></div>
     <div class="circuit circuit-right"></div>
-    <span class="label center" style="left:${layout.centerX}px;top:${layout.centerY}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(chordLabel(selectedNode?.chordName ?? selectedChord.full_name))}</span>
-    <span class="label major" style="left:${layout.centerX}px;top:${layout.centerY - layout.centerRadius + 24}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(bandLabel(family.name))}</span>
+    <span class="label center" style="left:${activeCenterX}px;top:${activeCenterY}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(chordLabel(selectedNode?.chordName ?? selectedChord.full_name))}</span>
+    <span class="label major" style="left:${activeCenterX}px;top:${activeCenterY - layout.centerRadius + 24}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(bandLabel(family.name))}</span>
     ${chordLabels}
     ${familyLabels}
-    ${NODE_MANIPULATION_ENABLED ? `<span class="label action plus" style="left:${layout.addX}px;top:${layout.addY}px">+</span>` : ""}
-    ${NODE_MANIPULATION_ENABLED ? `<span class="label action remove" style="left:${layout.removeX}px;top:${layout.removeY}px">×</span>` : ""}
+    ${showAddAction ? `<span class="label action plus" style="left:${addX}px;top:${addY}px">${escapeHtml(addSymbol)}</span>` : ""}
+    ${showRemoveAction ? `<span class="label action remove" style="left:${removeX}px;top:${removeY}px">${escapeHtml(removeSymbol)}</span>` : ""}
   `;
 }
 
 type GraphNodeView = {
   nodeId: number;
+  type: GraphNodeType;
   x: number;
   y: number;
   radius: number;
@@ -1839,12 +2216,13 @@ type GestureContext = {
   longPressTimer: number | null;
   mode: "tap" | "drag-node" | "pan";
   targetNodeId: number | null;
+  startedOnCenter: boolean;
   lastX: number;
   lastY: number;
 };
 
-let sceneZoom = 1;
-let scenePan = { x: 0, y: 0 };
+let sceneZoom = initialSceneZoom;
+let scenePan = { ...initialScenePan };
 let performPlaying = false;
 let performTimerId: number | null = null;
 let performCursorNodeId: number | null = null;
@@ -1853,11 +2231,15 @@ let modalOpenCount = 0;
 let resumePerformAfterModalClose = false;
 let debugFooterDraft = "";
 let restoreDebugInputFocus = false;
-const nodeOffsets: Record<number, { x: number; y: number }> = {};
+const nodeOffsets: Record<number, { x: number; y: number }> = { ...initialNodeOffsets };
+
+activeSavedLoopId = store.getState().savedLoopSelectedId;
+activeSavedLoopSignature = currentLoopStateSignature(store.getState());
 
 const CENTER_PULSE_MS = 620;
 let centerPulseStartMs = 0;
 let centerPulseRafId = 0;
+let centerPulseNodeId: number | null = null;
 
 function stopPerformLoop(): void {
   if (performTimerId !== null) {
@@ -1925,33 +2307,43 @@ function schedulePulseRedraw(): void {
   });
 }
 
-function triggerCenterPulse(): void {
+function triggerCenterPulse(nodeId?: number): void {
+  if (pulseStrengthAt(performance.now()) > 0.001) {
+    return;
+  }
+  centerPulseNodeId = nodeId ?? null;
   centerPulseStartMs = performance.now();
   schedulePulseRedraw();
 }
 
-function syncSelectionToNode(nodeId: number, status: string): void {
+function syncSelectionToNode(nodeId: number, status: string, options?: { updateSelection?: boolean }): void {
   const state = store.getState();
   const node = state.graph.nodes[nodeId];
   if (!node) {
     return;
   }
 
+  const updateSelection = options?.updateSelection ?? true;
+
   const match = findChordInCatalog(state.catalog, node.chordName);
-  const updatedGraph = {
-    ...state.graph,
-    selectedNodeId: nodeId,
-  };
+  const updatedGraph = updateSelection
+    ? {
+      ...state.graph,
+      selectedNodeId: nodeId,
+    }
+    : state.graph;
 
   if (match) {
     const chord = state.catalog.families[match.familyIndex]?.chords[match.chordIndex];
     if (chord) {
-      playChordPreview(chord);
+      playChordPreview(chord, nodeId);
     }
   }
 
-  saveGraph(updatedGraph);
-  const keepCatalogSelection = performPlaying;
+  if (updateSelection) {
+    saveGraph(updatedGraph);
+  }
+  const keepCatalogSelection = performPlaying || !updateSelection;
   store.setState({
     ...state,
     graph: updatedGraph,
@@ -1982,7 +2374,7 @@ function performStep(): void {
   }
 
   const chordName = graph.nodes[performCursorNodeId]?.chordName ?? "state";
-  syncSelectionToNode(performCursorNodeId, `Performing ${chordName}`);
+  syncSelectionToNode(performCursorNodeId, `Performing ${chordName}`, { updateSelection: false });
 }
 
 function startPerformLoop(options?: { resetCursor?: boolean }): void {
@@ -2015,34 +2407,22 @@ function handleModalClosed(): void {
 
 function buildGraphNodeViews(state: AppState, layout: StageLayout): GraphNodeView[] {
   const sequence = graphSequence(state.graph);
-  const orbitRadius = layout.chordOuter + Math.min(layout.width, layout.height) * 0.18 * sceneZoom;
-  const orbitStart = (-24 * Math.PI) / 180;
   const selectedId = state.graph.selectedNodeId;
-  const selectedNode = sequence.find((node) => node.id === selectedId);
-  const others = sequence.filter((node) => node.id !== selectedId);
+  const laneSpacing = clamp(layout.width * 0.32, 220, 360);
   const views: GraphNodeView[] = [];
 
-  if (selectedNode) {
-    views.push({
-      nodeId: selectedNode.id,
-      x: layout.centerX,
-      y: layout.centerY,
-      radius: layout.chordOuter,
-      isSelected: true,
-      chordName: selectedNode.chordName,
-    });
-  }
-
-  others.forEach((node, index) => {
-    const angle = orbitStart + (Math.PI * 2 * index) / Math.max(1, others.length);
-    const base = describeArcSegment(layout.centerX, layout.centerY, orbitRadius, angle);
+  sequence.forEach((node, index) => {
     const offset = nodeOffsets[node.id] ?? { x: 0, y: 0 };
+    const isSelected = node.id === selectedId;
+    const radius = layout.chordOuter;
+
     views.push({
       nodeId: node.id,
-      x: base.x + offset.x,
-      y: base.y + offset.y,
-      radius: 18,
-      isSelected: false,
+      type: node.type,
+      x: layout.centerX + index * laneSpacing + offset.x,
+      y: layout.centerY + offset.y,
+      radius,
+      isSelected,
       chordName: node.chordName,
     });
   });
@@ -2112,13 +2492,24 @@ function trimNodeOffsets(graph: LoopGraph): void {
 
 function buildHitZones(layout: StageLayout, geometry: SceneGeometry, state: AppState): HitZone[] {
   const zones: HitZone[] = [];
+  const showAddAction = selectedNodeAllowsAction(state, "add-after");
+  const showRemoveAction = selectedNodeAllowsAction(state, "remove-selected");
+  const showCenterCycle = selectedNodeAllowsAction(state, "cycle-selection");
+  const nodeViews = buildGraphNodeViews(state, layout);
+  const selectedView = nodeViews.find((view) => view.isSelected);
+  const activeCenterX = selectedView?.x ?? layout.centerX;
+  const activeCenterY = selectedView?.y ?? layout.centerY;
+  const addX = activeCenterX + layout.centerRadius * 0.48;
+  const addY = activeCenterY + layout.centerRadius * 0.45;
+  const removeX = activeCenterX - layout.centerRadius * 0.48;
+  const removeY = activeCenterY + layout.centerRadius * 0.45;
 
   geometry.chordSegments.forEach((seg, index) => {
     zones.push({
       kind: "chord",
       index,
-      cx: layout.centerX,
-      cy: layout.centerY,
+      cx: activeCenterX,
+      cy: activeCenterY,
       segment: seg,
     });
   });
@@ -2128,49 +2519,53 @@ function buildHitZones(layout: StageLayout, geometry: SceneGeometry, state: AppS
     zones.push({
       kind: "family",
       index: familyIndex,
-      cx: layout.centerX,
-      cy: layout.centerY,
+      cx: activeCenterX,
+      cy: activeCenterY,
       segment: seg,
     });
   });
 
-  if (NODE_MANIPULATION_ENABLED) {
-    zones.push({
-      kind: "add",
-      cx: layout.addX,
-      cy: layout.addY,
-      radius: layout.actionRadius,
-    });
-
-    zones.push({
-      kind: "remove",
-      cx: layout.removeX,
-      cy: layout.removeY,
-      radius: layout.actionRadius * 0.78,
-    });
-
+  if (showCenterCycle) {
     zones.push({
       kind: "center",
-      cx: layout.centerX,
-      cy: layout.centerY,
+      cx: activeCenterX,
+      cy: activeCenterY,
       radius: layout.centerRadius,
     });
+  }
 
-    const nodeViews = buildGraphNodeViews(state, layout);
-    nodeViews.forEach((view) => {
-      if (view.isSelected) {
-        return;
-      }
-
-      zones.push({
-        kind: "graph-node",
-        nodeId: view.nodeId,
-        cx: view.x,
-        cy: view.y,
-        radius: view.radius + 10,
-      });
+  // Add/remove controls overlap the center area, so they must be checked before center-cycle.
+  if (showAddAction) {
+    zones.push({
+      kind: "add",
+      cx: addX,
+      cy: addY,
+      radius: layout.actionRadius,
     });
   }
+
+  if (showRemoveAction) {
+    zones.push({
+      kind: "remove",
+      cx: removeX,
+      cy: removeY,
+      radius: layout.actionRadius * 0.88,
+    });
+  }
+
+  nodeViews.forEach((view) => {
+    if (view.isSelected) {
+      return;
+    }
+
+    zones.push({
+      kind: "graph-node",
+      nodeId: view.nodeId,
+      cx: view.x,
+      cy: view.y,
+      radius: view.radius + 10,
+    });
+  });
 
   return zones;
 }
@@ -2206,8 +2601,8 @@ function drawFallback2d(
 
   function drawSegment(seg: Segment, fill: string, stroke: string): void {
     ctx.beginPath();
-    ctx.arc(layout.centerX, layout.centerY, seg.outer, seg.start, seg.end);
-    ctx.arc(layout.centerX, layout.centerY, seg.inner, seg.end, seg.start, true);
+    ctx.arc(activeCenterX, activeCenterY, seg.outer, seg.start, seg.end);
+    ctx.arc(activeCenterX, activeCenterY, seg.inner, seg.end, seg.start, true);
     ctx.closePath();
     ctx.fillStyle = fill;
     ctx.fill();
@@ -2215,6 +2610,27 @@ function drawFallback2d(
     ctx.lineWidth = 2;
     ctx.stroke();
   }
+
+  function drawSegmentAt(cx: number, cy: number, seg: Segment, scale: number, fill: string, stroke: string, lineWidth = 1.6): void {
+    ctx.beginPath();
+    ctx.arc(cx, cy, seg.outer * scale, seg.start, seg.end);
+    ctx.arc(cx, cy, seg.inner * scale, seg.end, seg.start, true);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+  }
+
+  const nodeViews = buildGraphNodeViews(state, layout);
+  const selectedView = nodeViews.find((view) => view.isSelected);
+  const activeCenterX = selectedView?.x ?? layout.centerX;
+  const activeCenterY = selectedView?.y ?? layout.centerY;
+  const addX = activeCenterX + layout.centerRadius * 0.48;
+  const addY = activeCenterY + layout.centerRadius * 0.45;
+  const removeX = activeCenterX - layout.centerRadius * 0.48;
+  const removeY = activeCenterY + layout.centerRadius * 0.45;
 
   for (let index = 0; index < geometry.familySegments.length; index += 1) {
     const seg = geometry.familySegments[index];
@@ -2239,7 +2655,7 @@ function drawFallback2d(
   }
 
   ctx.beginPath();
-  ctx.arc(layout.centerX, layout.centerY, layout.centerRadius, 0, Math.PI * 2);
+  ctx.arc(activeCenterX, activeCenterY, layout.centerRadius, 0, Math.PI * 2);
   ctx.fillStyle = "rgba(6, 14, 31, 0.96)";
   ctx.fill();
   ctx.strokeStyle = "rgba(104, 169, 255, 0.9)";
@@ -2248,8 +2664,13 @@ function drawFallback2d(
 
   const pulseStrength = pulseStrengthAt(performance.now());
   if (pulseStrength > 0.001) {
+    const pulseNodeView = centerPulseNodeId !== null
+      ? findGraphNodeViewById(nodeViews, centerPulseNodeId)
+      : null;
+    const pulseCenterX = pulseNodeView?.x ?? activeCenterX;
+    const pulseCenterY = pulseNodeView?.y ?? activeCenterY;
     ctx.beginPath();
-    ctx.arc(layout.centerX, layout.centerY, layout.centerRadius + pulseStrength * 4, 0, Math.PI * 2);
+    ctx.arc(pulseCenterX, pulseCenterY, layout.centerRadius + pulseStrength * 4, 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(126, 231, 255, ${0.22 + pulseStrength * 0.7})`;
     ctx.lineWidth = 3 + pulseStrength * 8;
     ctx.shadowColor = "rgba(128, 238, 255, 0.95)";
@@ -2258,25 +2679,31 @@ function drawFallback2d(
     ctx.shadowBlur = 0;
   }
 
-  if (NODE_MANIPULATION_ENABLED) {
+  const showAddAction = selectedNodeAllowsAction(state, "add-after");
+  const showRemoveAction = selectedNodeAllowsAction(state, "remove-selected");
+
+  if (showAddAction) {
     ctx.beginPath();
-    ctx.arc(layout.addX, layout.addY, layout.actionRadius, 0, Math.PI * 2);
+    ctx.arc(addX, addY, layout.actionRadius, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(8, 15, 34, 0.94)";
     ctx.fill();
     ctx.strokeStyle = "rgba(126, 216, 255, 0.9)";
     ctx.lineWidth = 2;
     ctx.stroke();
+  }
 
+  if (showRemoveAction) {
     ctx.beginPath();
-    ctx.arc(layout.removeX, layout.removeY, layout.actionRadius * 0.78, 0, Math.PI * 2);
+    ctx.arc(removeX, removeY, layout.actionRadius * 0.88, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(8, 15, 34, 0.94)";
     ctx.fill();
     ctx.strokeStyle = "rgba(154, 172, 214, 0.86)";
     ctx.lineWidth = 2;
     ctx.stroke();
+  }
 
+  {
     const sequence = graphSequence(state.graph);
-    const nodeViews = buildGraphNodeViews(state, layout);
 
     sequence.forEach((node) => {
     const from = findGraphNodeViewById(nodeViews, node.id);
@@ -2286,22 +2713,24 @@ function drawFallback2d(
     }
 
     const isReturnToHead = node.nextId === state.graph.headId;
-    if (!from.isSelected && !isReturnToHead) {
-      return;
-    }
+    const fromStyle = graphNodeTypeConfig(from.type).renderStyle;
 
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     const len = Math.hypot(dx, dy);
     if (len < 1) {
-      const loopRadius = 12;
-      const loopCenterX = from.x + 10;
-      const loopCenterY = from.y - 10;
+      // Keep the self-loop outside the family ring so it does not read as an inner-circle border.
+      const loopRadius = Math.max(11, layout.centerRadius * 0.12);
+      const ringPadding = Math.max(8, layout.centerRadius * 0.06);
+      const loopOrbit = layout.familyOuter + loopRadius + ringPadding;
+      const loopAngle = -Math.PI * 0.34;
+      const loopCenterX = from.x + Math.cos(loopAngle) * loopOrbit;
+      const loopCenterY = from.y + Math.sin(loopAngle) * loopOrbit;
       const loopStart = Math.PI * 0.15;
       const loopEnd = Math.PI * 1.7;
       ctx.beginPath();
       ctx.arc(loopCenterX, loopCenterY, loopRadius, loopStart, loopEnd);
-      ctx.strokeStyle = "rgba(122, 204, 255, 0.86)";
+      ctx.strokeStyle = isReturnToHead ? fromStyle.returnStroke : fromStyle.edgeStroke;
       ctx.lineWidth = 2.2;
       ctx.stroke();
 
@@ -2316,7 +2745,7 @@ function drawFallback2d(
       ctx.lineTo(endX - tx * head + ty * head * 0.56, endY - ty * head - tx * head * 0.56);
       ctx.lineTo(endX - tx * head - ty * head * 0.56, endY - ty * head + tx * head * 0.56);
       ctx.closePath();
-      ctx.fillStyle = "rgba(160, 223, 255, 0.96)";
+      ctx.fillStyle = isReturnToHead ? fromStyle.returnArrowFill : fromStyle.edgeArrowFill;
       ctx.fill();
       return;
     }
@@ -2328,7 +2757,7 @@ function drawFallback2d(
     const endX = to.x - ux * (to.radius - 6);
     const endY = to.y - uy * (to.radius - 6);
 
-    if (isReturnToHead && !from.isSelected) {
+    if (isReturnToHead) {
       const midX = (startX + endX) * 0.5;
       const midY = (startY + endY) * 0.5;
       const awayX = midX - layout.centerX;
@@ -2340,7 +2769,7 @@ function drawFallback2d(
       ctx.beginPath();
       ctx.moveTo(startX, startY);
       ctx.quadraticCurveTo(controlX, controlY, endX, endY);
-      ctx.strokeStyle = "rgba(255, 210, 126, 0.96)";
+      ctx.strokeStyle = fromStyle.returnStroke;
       ctx.lineWidth = 3;
       ctx.stroke();
 
@@ -2357,7 +2786,7 @@ function drawFallback2d(
       ctx.lineTo(endX - dirX * head + nx * head * 0.58, endY - dirY * head + ny * head * 0.58);
       ctx.lineTo(endX - dirX * head - nx * head * 0.58, endY - dirY * head - ny * head * 0.58);
       ctx.closePath();
-      ctx.fillStyle = "rgba(255, 209, 130, 0.98)";
+      ctx.fillStyle = fromStyle.returnArrowFill;
       ctx.fill();
       return;
     }
@@ -2365,7 +2794,7 @@ function drawFallback2d(
     ctx.beginPath();
     ctx.moveTo(startX, startY);
     ctx.lineTo(endX, endY);
-    ctx.strokeStyle = isReturnToHead ? "rgba(255, 210, 126, 0.96)" : "rgba(122, 204, 255, 0.88)";
+    ctx.strokeStyle = isReturnToHead ? fromStyle.returnStroke : fromStyle.edgeStroke;
     ctx.lineWidth = isReturnToHead ? 3 : 2.4;
     ctx.stroke();
 
@@ -2377,7 +2806,7 @@ function drawFallback2d(
     ctx.lineTo(endX - ux * head + nx * head * 0.58, endY - uy * head + ny * head * 0.58);
     ctx.lineTo(endX - ux * head - nx * head * 0.58, endY - uy * head - ny * head * 0.58);
     ctx.closePath();
-    ctx.fillStyle = isReturnToHead ? "rgba(255, 209, 130, 0.98)" : "rgba(160, 223, 255, 0.96)";
+    ctx.fillStyle = isReturnToHead ? fromStyle.returnArrowFill : fromStyle.edgeArrowFill;
     ctx.fill();
     });
 
@@ -2386,21 +2815,148 @@ function drawFallback2d(
       return;
     }
 
-    const isHead = view.nodeId === state.graph.headId;
+    const nodeScale = 1;
+    const match = findChordInCatalog(state.catalog, view.chordName);
+    const nodeFamilyIndex = match?.familyIndex ?? state.selectedFamilyIndex;
+    const nodeFamily = state.catalog.families[nodeFamilyIndex] ?? getSelectedChordFamily(state);
+    const nodeChordCount = clamp(nodeFamily.chords.length, 1, MAX_SEGMENTS);
+    const nodeChordIndex = clamp(match?.chordIndex ?? 0, 0, Math.max(0, nodeChordCount - 1));
+    const familyIndices = visibleFamilyIndices(state, Math.min(state.catalog.families.length, MAX_SEGMENTS));
+    const familySegments = makeSegments(
+      familyIndices.length,
+      -90,
+      270,
+      layout.familyInner,
+      layout.familyOuter,
+      1.2,
+    );
+    const selectedFamilySegmentIndex = familyIndices.indexOf(nodeFamilyIndex);
+    let chordSegments: Segment[] = [];
+
+    if (selectedFamilySegmentIndex >= 0) {
+      const selectedFamilySegment = familySegments[selectedFamilySegmentIndex];
+      if (selectedFamilySegment) {
+        const familyArc = selectedFamilySegment.end - selectedFamilySegment.start;
+        const expandedArc = Math.min((138 * Math.PI) / 180, familyArc * 2.1);
+        const centerAngle = (selectedFamilySegment.start + selectedFamilySegment.end) * 0.5;
+        const expandedStart = centerAngle - expandedArc * 0.5;
+        const gap = (2 * Math.PI) / 180;
+        const step = expandedArc / nodeChordCount;
+        chordSegments = Array.from({ length: nodeChordCount }, (_, index) => ({
+          start: expandedStart + step * index + gap * 0.5,
+          end: expandedStart + step * (index + 1) - gap * 0.5,
+          inner: layout.chordInner,
+          outer: layout.chordOuter,
+        }));
+      }
+    }
+
+    if (chordSegments.length === 0) {
+      chordSegments = makeSegments(
+        nodeChordCount,
+        230,
+        330,
+        layout.chordInner,
+        layout.chordOuter,
+        2.4,
+      );
+    }
+
+    familySegments.forEach((seg, index) => {
+      const active = index === selectedFamilySegmentIndex;
+      drawSegmentAt(
+        view.x,
+        view.y,
+        seg,
+        nodeScale,
+        active ? "rgba(26, 56, 95, 0.86)" : "rgba(9, 17, 38, 0.88)",
+        active ? "rgba(121, 214, 255, 0.84)" : "rgba(96, 145, 243, 0.62)",
+        1.25,
+      );
+    });
+
+    chordSegments.forEach((seg, index) => {
+      const active = index === nodeChordIndex;
+      drawSegmentAt(
+        view.x,
+        view.y,
+        seg,
+        nodeScale,
+        active ? "rgba(19, 57, 84, 0.9)" : "rgba(12, 20, 48, 0.9)",
+        active ? "rgba(118, 230, 255, 0.9)" : "rgba(107, 165, 255, 0.66)",
+        1.35,
+      );
+    });
+
+    familySegments.forEach((seg, index) => {
+      const familyIndex = familyIndices[index] ?? 0;
+      const familyName = shorthand(state.catalog.families[familyIndex]?.name ?? "Family");
+      const point = segmentMidpoint(layout, seg, view.x, view.y);
+      ctx.fillStyle = index === selectedFamilySegmentIndex
+        ? "rgba(222, 242, 255, 0.96)"
+        : "rgba(181, 214, 255, 0.86)";
+      ctx.font = "600 10px 'Space Grotesk', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(familyName, point.x, point.y);
+    });
+
+    chordSegments.forEach((seg, index) => {
+      const chord = nodeFamily.chords[index];
+      const label = chordLabel(chord?.full_name ?? chord?.numeral ?? "I");
+      const point = segmentMidpoint(layout, seg, view.x, view.y);
+      ctx.fillStyle = index === nodeChordIndex
+        ? "rgba(221, 249, 255, 0.98)"
+        : "rgba(165, 208, 255, 0.9)";
+      ctx.font = "600 11px 'Space Grotesk', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, point.x, point.y);
+    });
+
+    const nodeAddX = view.x + layout.centerRadius * 0.48;
+    const nodeAddY = view.y + layout.centerRadius * 0.45;
+    const nodeRemoveX = view.x - layout.centerRadius * 0.48;
+    const nodeRemoveY = view.y + layout.centerRadius * 0.45;
 
     ctx.beginPath();
-    ctx.arc(view.x, view.y, view.radius, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(8, 16, 36, 0.92)";
+    ctx.arc(nodeAddX, nodeAddY, layout.actionRadius, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(8, 15, 34, 0.92)";
     ctx.fill();
-    ctx.strokeStyle = isHead ? "rgba(255, 210, 130, 0.9)" : "rgba(106, 165, 255, 0.78)";
-    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = "rgba(126, 216, 255, 0.78)";
+    ctx.lineWidth = 1.6;
     ctx.stroke();
 
-    ctx.fillStyle = "rgba(149, 198, 255, 0.95)";
+    ctx.beginPath();
+    ctx.arc(nodeRemoveX, nodeRemoveY, layout.actionRadius * 0.88, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(8, 15, 34, 0.92)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(154, 172, 214, 0.72)";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(214, 239, 255, 0.96)";
+    ctx.font = "700 16px 'Space Grotesk', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("+", nodeAddX, nodeAddY + 0.5);
+    ctx.fillText("-", nodeRemoveX, nodeRemoveY + 0.5);
+
+    const isHead = view.nodeId === state.graph.headId;
+    const viewStyle = graphNodeTypeConfig(view.type).renderStyle;
+    ctx.beginPath();
+    ctx.arc(view.x, view.y, layout.centerRadius * nodeScale, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(6, 14, 31, 0.95)";
+    ctx.fill();
+    ctx.strokeStyle = isHead ? viewStyle.headNodeStroke : viewStyle.nodeStroke;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = viewStyle.nodeTextFill;
     ctx.font = "600 11px 'Space Grotesk', sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(view.chordName.slice(0, 7), view.x, view.y + 1);
+    ctx.fillText(view.chordName.slice(0, 9), view.x, view.y + 1);
     });
   }
 }
@@ -2475,32 +3031,57 @@ function selectChord(index: number): void {
 
 function addNode(): void {
   const state = store.getState();
-  const chord = getSelectedChord(state);
-  const graph = addAfterSelected(state.graph, chord.full_name);
+  const sourceNode = state.graph.nodes[state.graph.selectedNodeId];
+  const sourceChordName = sourceNode?.chordName ?? getSelectedChord(state).full_name;
+  const previousSelectedId = state.graph.selectedNodeId;
+  const previousCount = graphSequence(state.graph).length;
+  const insertedNodeId = state.graph.nextNodeId;
+  const graph = addAfterSelected(state.graph, sourceChordName);
   trimNodeOffsets(graph);
   saveGraph(graph);
+  const nextCount = graphSequence(graph).length;
+  const match = findChordInCatalog(state.catalog, sourceChordName);
   store.setState({
     graph,
-    status: `Inserted state/node ${chord.full_name}`,
+    chordFanVisible: true,
+    selectedFamilyIndex: match?.familyIndex ?? state.selectedFamilyIndex,
+    selectedChordIndex: match?.chordIndex ?? state.selectedChordIndex,
+    status: `Inserted state/node ${sourceChordName}`,
   });
+  appendDebugLog(
+    `[ui] add node id=${insertedNodeId} after=${previousSelectedId} chord="${sourceChordName}" count ${previousCount}->${nextCount}`,
+  );
+
+  const canvas = root.querySelector<HTMLCanvasElement>(".webgl-stage");
+  if (canvas) {
+    redrawCanvasOnly(canvas);
+  }
 }
 
 function removeNode(): void {
   const state = store.getState();
-  if (state.graph.selectedNodeId === state.graph.headId) {
+  const nodeCount = graphSequence(state.graph).length;
+  if (nodeCount <= 1) {
+    appendDebugLog("[ui] remove ignored: only one node in graph");
     store.setState({
-      status: "Initial node cannot be removed",
+      status: "Only one node remains; remove is ignored",
     });
     return;
   }
   const label = state.graph.nodes[state.graph.selectedNodeId]?.chordName ?? "node";
+  const removedNodeId = state.graph.selectedNodeId;
+  const previousCount = graphSequence(state.graph).length;
   const graph = removeSelected(state.graph);
   trimNodeOffsets(graph);
   saveGraph(graph);
+  const nextCount = graphSequence(graph).length;
   store.setState({
     graph,
     status: `Removed state/node ${label}`,
   });
+  appendDebugLog(
+    `[ui] remove node id=${removedNodeId} chord="${label}" count ${previousCount}->${nextCount}`,
+  );
 }
 
 function cycleSelectedNode(): void {
@@ -2518,6 +3099,187 @@ function cycleSelectedNode(): void {
     selectedChordIndex: match?.chordIndex ?? state.selectedChordIndex,
     status: `Selected state/node ${selectedChord || "node"}`,
   });
+  appendDebugLog(
+    `[ui] cycle selected node -> id=${graph.selectedNodeId} chord="${selectedChord || "node"}"`,
+  );
+}
+
+function resetCurrentStateToInitialNode(): void {
+  stopPerformLoop();
+  performCursorNodeId = null;
+
+  const state = store.getState();
+  const initialChord = initialChordName(state.catalog);
+  const nextLoopName = randomLoopName();
+  const graph = createInitialGraph(initialChord);
+  const match = findChordInCatalog(state.catalog, initialChord);
+
+  for (const key of Object.keys(nodeOffsets)) {
+    delete nodeOffsets[key];
+  }
+  sceneZoom = 1;
+  scenePan = { x: 0, y: 0 };
+
+  saveGraph(graph);
+  store.setState({
+    ...state,
+    graph,
+    selectedFamilyIndex: match?.familyIndex ?? 0,
+    selectedChordIndex: match?.chordIndex ?? 0,
+    chordFanVisible: false,
+    savedLoopSelectedId: null,
+    savedLoopDraft: nextLoopName,
+    savedLoopsPage: 0,
+    status: "State reset to one initial node",
+  });
+  activeSavedLoopId = null;
+  activeSavedLoopSignature = currentLoopStateSignature(store.getState());
+  appendDebugLog(`[ui] reset state -> nodeCount=${graphSequence(graph).length} chord="${initialChord}" name="${nextLoopName}"`);
+}
+
+function buildSavedLoopRecord(state: AppState, id: string, name: string): SavedLoopRecord {
+  const offsets: Record<number, { x: number; y: number }> = {};
+  for (const [nodeIdText, offset] of Object.entries(nodeOffsets)) {
+    const nodeId = Number(nodeIdText);
+    if (!Number.isFinite(nodeId)) {
+      continue;
+    }
+    offsets[nodeId] = { x: offset.x, y: offset.y };
+  }
+
+  return {
+    id,
+    name,
+    graph: cloneGraph(state.graph),
+    selectedFamilyIndex: state.selectedFamilyIndex,
+    selectedChordIndex: state.selectedChordIndex,
+    chordFanVisible: state.chordFanVisible,
+    sceneZoom,
+    scenePan: { ...scenePan },
+    nodeOffsets: offsets,
+    settings: {
+      centralTone: state.settings.centralTone,
+      bpm: state.settings.bpm,
+      timeSignature: state.settings.timeSignature,
+      swing: state.settings.swing,
+      waveform: state.settings.waveform,
+      effects: state.settings.effects,
+      midiEnabled: state.settings.midiEnabled,
+      midiPortId: state.settings.midiPortId,
+      midiChannel: state.settings.midiChannel,
+      debugFooterEnabled: state.settings.debugFooterEnabled,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function saveCurrentLoopState(): void {
+  const state = store.getState();
+  const rawName = state.savedLoopDraft.trim();
+  const name = rawName.length > 0 ? rawName : randomLoopName();
+  const id = `loop-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  const nextRecord = buildSavedLoopRecord(state, id, name);
+  const savedLoops = [nextRecord, ...state.savedLoops];
+  const pageCount = Math.max(1, Math.ceil(savedLoops.length / SAVED_LOOPS_PAGE_SIZE));
+
+  saveSavedLoops(savedLoops);
+  store.setState({
+    ...state,
+    savedLoops,
+    savedLoopSelectedId: id,
+    savedLoopDraft: name,
+    savedLoopsPage: 0,
+    status: `Saved loop ${name}`,
+  });
+  activeSavedLoopId = id;
+  activeSavedLoopSignature = currentLoopStateSignature(store.getState());
+  restoreSavedLoopNameFocus = true;
+  savedLoopNameCursor = name.length;
+  appendDebugLog(`[ui] saved loop id=${id} name="${name}"`);
+}
+
+function loadSavedLoopState(loopId: string): void {
+  const state = store.getState();
+  const loop = state.savedLoops.find((entry) => entry.id === loopId);
+  if (!loop) {
+    return;
+  }
+
+  if (state.settings.showSavedLoopsPanel) {
+    handleModalClosed();
+  }
+
+  if (shouldPromptToSaveCurrent(state)) {
+    const shouldSave = window.confirm("Save current state before loading this loop?");
+    if (shouldSave) {
+      saveCurrentLoopState();
+    }
+  }
+
+  stopPerformLoop();
+  performCursorNodeId = null;
+
+  const settings: AppSettings = {
+    ...state.settings,
+    ...loop.settings,
+    showPanel: false,
+    showPerformPanel: false,
+    showSavedLoopsPanel: false,
+    midiPorts: state.settings.midiPorts,
+  };
+  const catalog = transposeCatalogForCentralTone(CATALOG_TEMPLATE, settings.centralTone);
+  const graph = cloneGraph(loop.graph);
+  for (const key of Object.keys(nodeOffsets)) {
+    delete nodeOffsets[Number(key)];
+  }
+  for (const [nodeIdText, offset] of Object.entries(loop.nodeOffsets ?? {})) {
+    const nodeId = Number(nodeIdText);
+    if (!Number.isFinite(nodeId)) {
+      continue;
+    }
+    nodeOffsets[nodeId] = {
+      x: Number(offset?.x) || 0,
+      y: Number(offset?.y) || 0,
+    };
+  }
+  trimNodeOffsets(graph);
+
+  sceneZoom = clamp(Number(loop.sceneZoom) || 1, 0.30, 1.85);
+  scenePan = {
+    x: Number(loop.scenePan?.x) || 0,
+    y: Number(loop.scenePan?.y) || 0,
+  };
+
+  const selectedFamilyIndex = clamp(loop.selectedFamilyIndex, 0, Math.max(0, catalog.families.length - 1));
+  const selectedChordIndex = clamp(
+    loop.selectedChordIndex,
+    0,
+    Math.max(0, (catalog.families[selectedFamilyIndex]?.chords.length ?? 1) - 1),
+  );
+
+  saveSettings(settings);
+  saveGraph(graph);
+  const nextState: AppState = {
+    ...state,
+    catalog,
+    graph,
+    settings,
+    selectedFamilyIndex,
+    selectedChordIndex,
+    chordFanVisible: loop.chordFanVisible,
+    savedLoopSelectedId: loop.id,
+    savedLoopDraft: loop.name,
+    savedLoopsPage: clamp(
+      Math.floor(state.savedLoops.findIndex((entry) => entry.id === loop.id) / SAVED_LOOPS_PAGE_SIZE),
+      0,
+      Math.max(0, Math.ceil(state.savedLoops.length / SAVED_LOOPS_PAGE_SIZE) - 1),
+    ),
+    status: `Loaded loop ${loop.name}`,
+  };
+  store.setState(nextState);
+  activeSavedLoopId = loop.id;
+  activeSavedLoopSignature = currentLoopStateSignature(store.getState());
+  appendDebugLog(`[ui] loaded loop id=${loop.id} name="${loop.name}"`);
 }
 
 function redrawCanvasOnly(canvas: HTMLCanvasElement): void {
@@ -2554,6 +3316,20 @@ function bindCornerControls(shell: HTMLElement): void {
     if (!state.settings.showSavedLoopsPanel) {
       handleModalOpened();
     }
+    const selectedLoop = state.savedLoops.find((loop) => loop.id === state.savedLoopSelectedId);
+    if (selectedLoop) {
+      store.setState({
+        ...state,
+        savedLoopDraft: selectedLoop.name,
+      });
+    } else if (!state.savedLoopDraft.trim()) {
+      store.setState({
+        ...state,
+        savedLoopDraft: randomLoopName(),
+      });
+    }
+    restoreSavedLoopNameFocus = true;
+    savedLoopNameCursor = (selectedLoop?.name ?? state.savedLoopDraft).length;
     updateSettings({ showSavedLoopsPanel: true }, "Saved loops opened");
   });
 
@@ -2625,23 +3401,29 @@ function bindSettingsPanel(shell: HTMLElement): void {
   midiEnabledToggle?.addEventListener("change", async () => {
     const enabled = midiEnabledToggle.checked;
     if (!enabled) {
+      appendDebugLog("[midi] MIDI disabled by user");
       updateSettings({ midiEnabled: false }, "MIDI disabled");
       return;
     }
 
+    updateSettings({ midiEnabled: true }, "Enabling MIDI...");
+
     await refreshMidiPorts();
     const access = await ensureMidiAccess();
     if (!access) {
+      appendDebugLog("[midi] MIDI enable failed: Web MIDI access unavailable");
       updateSettings({ midiEnabled: false }, "Web MIDI unavailable");
       return;
     }
 
     const latest = store.getState();
     if (latest.settings.midiPorts.length === 0) {
+      appendDebugLog("[midi] MIDI enable failed: no output ports found");
       updateSettings({ midiEnabled: false }, "No MIDI output ports found");
       return;
     }
 
+    appendDebugLog(`[midi] MIDI enabled with port ${latest.settings.midiPortId || "(first available)"}`);
     updateSettings({ midiEnabled: true }, "MIDI enabled");
   });
 
@@ -2770,22 +3552,60 @@ function bindSavedLoopsPanel(shell: HTMLElement): void {
   const nameInput = shell.querySelector<HTMLInputElement>("input[data-saved-loop-input='name']");
   nameInput?.addEventListener("input", () => {
     const state = store.getState();
+    restoreSavedLoopNameFocus = true;
+    savedLoopNameCursor = nameInput.selectionStart ?? nameInput.value.length;
     store.setState({
       ...state,
       savedLoopDraft: nameInput.value,
     });
   });
 
-  shell.querySelectorAll<HTMLButtonElement>("button[data-saved-loop-index]").forEach((button) => {
+  nameInput?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    saveCurrentLoopState();
+  });
+
+  if (nameInput && restoreSavedLoopNameFocus) {
+    nameInput.focus();
+    const cursor = clamp(savedLoopNameCursor, 0, nameInput.value.length);
+    nameInput.setSelectionRange(cursor, cursor);
+    restoreSavedLoopNameFocus = false;
+  }
+
+  const saveButton = shell.querySelector<HTMLButtonElement>("button[data-saved-loops-action='save']");
+  saveButton?.addEventListener("click", () => {
+    saveCurrentLoopState();
+  });
+
+  const resetButton = shell.querySelector<HTMLButtonElement>("button[data-saved-loops-action='reset-state']");
+  resetButton?.addEventListener("click", () => {
+    resetCurrentStateToInitialNode();
+  });
+
+  shell.querySelectorAll<HTMLButtonElement>("button[data-saved-loop-id]").forEach((button) => {
     button.addEventListener("click", () => {
-      const value = Number(button.dataset.savedLoopIndex ?? 0);
-      const index = clamp(value, 0, DUMMY_SAVED_PROGRESSIONS.length - 1);
+      const loopId = button.dataset.savedLoopId ?? "";
+      if (!loopId) {
+        return;
+      }
+      loadSavedLoopState(loopId);
+    });
+  });
+
+  shell.querySelectorAll<HTMLButtonElement>("button[data-saved-loops-page]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const requestedPage = Number(button.dataset.savedLoopsPage ?? 0);
       const state = store.getState();
+      const pageCount = Math.max(1, Math.ceil(state.savedLoops.length / SAVED_LOOPS_PAGE_SIZE));
       store.setState({
         ...state,
-        savedLoopSelectedIndex: index,
-        status: `Selected saved progression ${index + 1}`,
+        savedLoopsPage: clamp(requestedPage, 0, pageCount - 1),
       });
+      restoreSavedLoopNameFocus = true;
+      savedLoopNameCursor = state.savedLoopDraft.length;
     });
   });
 }
@@ -2811,14 +3631,17 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
     scenePan.y += (pointerY - centerY) * (1 - ratio);
 
     sceneZoom = newZoom;
+    saveInteractionState();
     redrawCanvasOnly(canvas);
   }, { passive: false });
 
   canvas.addEventListener("pointerdown", (event) => {
     const point = pointerToCanvas(canvas, event);
     const hit = hitTest(hitZones, point);
-    const draggingGraphNode = NODE_MANIPULATION_ENABLED && hit?.kind === "graph-node";
+    const startedOnCenter = hit?.kind === "center";
+    const draggingGraphNode = hit?.kind === "graph-node" || startedOnCenter;
     const panGesture = !hit;
+    const state = store.getState();
 
     pressContext = {
       pointerId: event.pointerId,
@@ -2828,7 +3651,10 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
       gestureHandled: false,
       longPressTimer: null,
       mode: draggingGraphNode ? "drag-node" : panGesture ? "pan" : "tap",
-      targetNodeId: draggingGraphNode ? hit.nodeId : null,
+      targetNodeId: hit?.kind === "graph-node"
+        ? hit.nodeId
+        : (startedOnCenter ? state.graph.selectedNodeId : null),
+      startedOnCenter,
       lastX: event.clientX,
       lastY: event.clientY,
     };
@@ -2845,7 +3671,7 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
       pressContext.moved = true;
     }
 
-    if (NODE_MANIPULATION_ENABLED && pressContext.mode === "drag-node" && pressContext.targetNodeId !== null) {
+    if (pressContext.mode === "drag-node" && pressContext.targetNodeId !== null) {
       const nodeId = pressContext.targetNodeId;
       const nodeOffset = nodeOffsets[nodeId] ?? { x: 0, y: 0 };
       const deltaX = event.clientX - pressContext.lastX;
@@ -2874,9 +3700,24 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
     }
 
     const point = pointerToCanvas(canvas, event);
-    if (NODE_MANIPULATION_ENABLED && pressContext.mode === "drag-node") {
+    if (pressContext.mode === "drag-node") {
       const draggedNodeId = pressContext.targetNodeId;
+      if (draggedNodeId !== null && pressContext.moved) {
+        const finalOffset = nodeOffsets[draggedNodeId] ?? { x: 0, y: 0 };
+        appendDebugLog(
+          `[ui] drag node id=${draggedNodeId} offset=(${Math.round(finalOffset.x)},${Math.round(finalOffset.y)})`,
+        );
+        saveInteractionState();
+      }
       if (draggedNodeId !== null && !pressContext.moved) {
+        if (pressContext.startedOnCenter) {
+          cycleSelectedNode();
+          if (canvas.hasPointerCapture(event.pointerId)) {
+            canvas.releasePointerCapture(event.pointerId);
+          }
+          pressContext = null;
+          return;
+        }
         const state = store.getState();
         const selectedNode = state.graph.nodes[draggedNodeId];
         if (selectedNode) {
@@ -2896,6 +3737,9 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
             ...state.graph,
             selectedNodeId: draggedNodeId,
           });
+          appendDebugLog(
+            `[ui] selected node id=${draggedNodeId} chord="${selectedNode.chordName}"`,
+          );
         }
       }
     } else if (!pressContext.moved) {
@@ -2904,13 +3748,13 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
         selectFamily(hit.index);
       } else if (hit?.kind === "chord") {
         selectChord(hit.index);
-      } else if (NODE_MANIPULATION_ENABLED && hit?.kind === "add") {
+      } else if (hit?.kind === "add") {
         addNode();
-      } else if (NODE_MANIPULATION_ENABLED && hit?.kind === "remove") {
+      } else if (hit?.kind === "remove") {
         removeNode();
-      } else if (NODE_MANIPULATION_ENABLED && hit?.kind === "center") {
+      } else if (hit?.kind === "center") {
         cycleSelectedNode();
-      } else if (NODE_MANIPULATION_ENABLED && hit?.kind === "graph-node") {
+      } else if (hit?.kind === "graph-node") {
         const state = store.getState();
         const selectedNode = state.graph.nodes[hit.nodeId];
         if (selectedNode) {
@@ -2930,8 +3774,14 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
             ...state.graph,
             selectedNodeId: hit.nodeId,
           });
+          appendDebugLog(
+            `[ui] selected node id=${hit.nodeId} chord="${selectedNode.chordName}"`,
+          );
         }
       }
+    }
+    if (pressContext.mode === "pan" && pressContext.moved) {
+      saveInteractionState();
     }
     if (canvas.hasPointerCapture(event.pointerId)) {
       canvas.releasePointerCapture(event.pointerId);
@@ -3034,6 +3884,7 @@ function animate(now: number): void {
 }
 
 store.subscribe(render);
+store.subscribe(saveInteractionState);
 render();
 
 if (!FORCE_CANVAS_RENDERER) {
@@ -3041,6 +3892,7 @@ if (!FORCE_CANVAS_RENDERER) {
 }
 
 window.addEventListener("beforeunload", () => {
+  saveInteractionState();
   stopPerformLoop();
   if (centerPulseRafId) {
     window.cancelAnimationFrame(centerPulseRafId);
