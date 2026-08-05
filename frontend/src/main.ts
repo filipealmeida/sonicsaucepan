@@ -76,6 +76,7 @@ type SavedLoopRecord = {
     swing: number;
     waveform: WaveformOption;
     effects: EffectOption;
+    bassPreset: BassPresetOption;
     midiEnabled: boolean;
     midiPortId: string;
     midiChannel: number;
@@ -106,6 +107,8 @@ type TimeSignatureOption = "4/4" | "3/4" | "6/8";
 
 type EffectOption = "none" | "delay" | "chorus";
 
+type BassPresetOption = "off" | "root" | "root-octave" | "root-fifth" | "oom-pah" | "stride";
+
 type MidiPortOption = {
   id: string;
   name: string;
@@ -124,6 +127,7 @@ type AppSettings = {
   swing: number;
   waveform: WaveformOption;
   effects: EffectOption;
+  bassPreset: BassPresetOption;
   midiEnabled: boolean;
   midiPortId: string;
   midiChannel: number;
@@ -205,6 +209,15 @@ const CENTRAL_TONES = [
 const WAVEFORMS: WaveformOption[] = ["sine", "triangle", "sawtooth", "square"];
 const TIME_SIGNATURES: TimeSignatureOption[] = ["4/4", "3/4", "6/8"];
 const EFFECT_OPTIONS: EffectOption[] = ["none", "delay", "chorus"];
+const BASS_PRESET_OPTIONS: BassPresetOption[] = ["off", "root", "root-octave", "root-fifth", "oom-pah", "stride"];
+const BASS_PRESET_LABELS: Record<BassPresetOption, string> = {
+  off: "Off",
+  root: "Root",
+  "root-octave": "Root + Octave",
+  "root-fifth": "Root + Fifth",
+  "oom-pah": "Oom-pah",
+  stride: "Stride",
+};
 const MAX_DEBUG_LOGS = 220;
 
 const GRAPH_NODE_TYPE_REGISTRY: Record<GraphNodeType, GraphNodeTypeConfig> = {
@@ -669,6 +682,7 @@ function currentLoopStateSignature(state: AppState): string {
       swing: state.settings.swing,
       waveform: state.settings.waveform,
       effects: state.settings.effects,
+      bassPreset: state.settings.bassPreset,
       midiEnabled: state.settings.midiEnabled,
       midiPortId: state.settings.midiPortId,
       midiChannel: state.settings.midiChannel,
@@ -704,6 +718,7 @@ function defaultSettings(): AppSettings {
     swing: 0,
     waveform: "triangle",
     effects: "none",
+    bassPreset: "root",
     midiEnabled: false,
     midiPortId: "",
     midiChannel: 1,
@@ -721,6 +736,10 @@ function normalizeTimeSignature(value: unknown): TimeSignatureOption {
 
 function normalizeEffects(value: unknown): EffectOption {
   return EFFECT_OPTIONS.includes(value as EffectOption) ? (value as EffectOption) : "none";
+}
+
+function normalizeBassPreset(value: unknown): BassPresetOption {
+  return BASS_PRESET_OPTIONS.includes(value as BassPresetOption) ? (value as BassPresetOption) : "root";
 }
 
 function normalizeBpm(value: unknown): number {
@@ -909,6 +928,7 @@ function loadSettings(): AppSettings {
       swing: normalizeSwing(parsed.swing),
       waveform: normalizeWaveform(parsed.waveform),
       effects: normalizeEffects(parsed.effects),
+      bassPreset: normalizeBassPreset(parsed.bassPreset),
       midiEnabled: Boolean(parsed.midiEnabled),
       midiPortId: typeof parsed.midiPortId === "string" ? parsed.midiPortId : "",
       midiChannel: clamp(Number(parsed.midiChannel) || 1, 1, 16),
@@ -934,6 +954,7 @@ function saveSettings(settings: AppSettings): void {
       swing: settings.swing,
       waveform: settings.waveform,
       effects: settings.effects,
+      bassPreset: settings.bassPreset,
       midiEnabled: settings.midiEnabled,
       midiPortId: settings.midiPortId,
       midiChannel: settings.midiChannel,
@@ -1106,6 +1127,59 @@ function chordToMidi(chord: ChordEntry): number[] {
 
 function midiToFrequency(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+function toBassRegister(midi: number): number {
+  // Target range E1–B2 (MIDI 28–47)
+  let n = midi;
+  while (n > 47) n -= 12;
+  while (n < 28) n += 12;
+  return n;
+}
+
+function computeBassNotes(chord: ChordEntry, preset: BassPresetOption, beatWithinChord: number, stepsPerChord: number): number[] {
+  if (preset === "off") return [];
+  const chordMidi = chordToMidi(chord);
+  const root = toBassRegister(chordMidi[0]);
+  const fifth = root + 7;
+  const midBeat = Math.max(1, Math.floor(stepsPerChord / 2));
+  switch (preset) {
+    case "root": return beatWithinChord === 0 ? [root] : [];
+    case "root-octave": return beatWithinChord === 0 ? [root, root + 12] : [];
+    case "root-fifth": return beatWithinChord === 0 ? [root, fifth] : [];
+    case "oom-pah":
+      if (beatWithinChord === 0) return [root];
+      if (stepsPerChord >= 2 && beatWithinChord === midBeat) return [fifth];
+      return [];
+    case "stride":
+      return beatWithinChord % 2 === 0 ? [root] : [root + 12];
+    default: return [];
+  }
+}
+
+function playBassNotes(midiNotes: number[], beatMs: number): void {
+  if (midiNotes.length === 0) return;
+  let context: AudioContext;
+  try { context = getAudioContext(); } catch { return; }
+  if (context.state === "suspended") void context.resume();
+
+  const now = context.currentTime;
+  const sustainSec = Math.max(0.06, (beatMs * 0.75) / 1000);
+  const master = context.createGain();
+  master.connect(context.destination);
+  master.gain.setValueAtTime(0, now);
+  master.gain.linearRampToValueAtTime(0.32, now + 0.012);
+  master.gain.setValueAtTime(0.32, now + sustainSec - 0.04);
+  master.gain.exponentialRampToValueAtTime(0.001, now + sustainSec);
+
+  midiNotes.forEach((midi, i) => {
+    const osc = context.createOscillator();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(midiToFrequency(midi), now);
+    osc.connect(master);
+    osc.start(now + i * 0.004);
+    osc.stop(now + sustainSec + 0.05);
+  });
 }
 
 let audioContextRef: AudioContext | null = null;
@@ -2128,6 +2202,9 @@ function buildPerformPanel(state: AppState): string {
   const beatsPerChordOptions = BEATS_PER_CHORD_OPTIONS
     .map((v) => `<option value="${v}" ${v === settings.beatsPerChord ? "selected" : ""}>${escapeHtml(bpcLabel(v))}</option>`)
     .join("");
+  const bassPresetOptions = BASS_PRESET_OPTIONS
+    .map((p) => `<option value="${p}" ${p === settings.bassPreset ? "selected" : ""}>${escapeHtml(BASS_PRESET_LABELS[p])}</option>`)
+    .join("");
   const effectsOptions = EFFECT_OPTIONS
     .map((effect) => `<option value="${effect}" ${effect === settings.effects ? "selected" : ""}>${escapeHtml(effect[0].toUpperCase() + effect.slice(1))}</option>`)
     .join("");
@@ -2168,6 +2245,10 @@ function buildPerformPanel(state: AppState): string {
           <label class="settings-field">
             <span>Effects</span>
             <select data-perform-setting="effects">${effectsOptions}</select>
+          </label>
+          <label class="settings-field">
+            <span>Bass</span>
+            <select data-perform-setting="bass-preset">${bassPresetOptions}</select>
           </label>
         </div>
       </section>
@@ -2583,10 +2664,30 @@ function performStep(): void {
 
   if (isChordBoundary) {
     const chordName = graph.nodes[performCursorNodeId]?.chordName ?? "state";
-    const { bpm, beatsPerChord } = state.settings;
+    const { bpm, beatsPerChord, bassPreset } = state.settings;
     const beatMs = 60000 / clamp(bpm, 40, 240);
     const sustainMs = normalizeBeatsPerChord(beatsPerChord) * beatMs * 0.92;
     syncSelectionToNode(performCursorNodeId, `Performing ${chordName}`, { updateSelection: false, sustainMs });
+    const node = graph.nodes[performCursorNodeId];
+    const catalog = state.catalog;
+    const match = node ? findChordInCatalog(catalog, node.chordName) : null;
+    const chordEntry = match ? catalog.families[match.familyIndex]?.chords[match.chordIndex] : null;
+    if (chordEntry) {
+      const bassNotes = computeBassNotes(chordEntry, bassPreset, 0, stepsPerChord);
+      playBassNotes(bassNotes, beatMs);
+    }
+  } else {
+    // On non-boundary beats, handle beat-aware bass patterns (oom-pah, stride).
+    const { bpm, bassPreset } = state.settings;
+    const beatMs = 60000 / clamp(bpm, 40, 240);
+    const beatWithinChord = performStepCount % stepsPerChord;
+    const node = performCursorNodeId !== null ? graph.nodes[performCursorNodeId] : null;
+    const match = node ? findChordInCatalog(state.catalog, node.chordName) : null;
+    const chordEntry = match ? state.catalog.families[match.familyIndex]?.chords[match.chordIndex] : null;
+    if (chordEntry) {
+      const bassNotes = computeBassNotes(chordEntry, bassPreset, beatWithinChord, stepsPerChord);
+      playBassNotes(bassNotes, beatMs);
+    }
   }
 }
 
@@ -3372,6 +3473,7 @@ function buildSavedLoopRecord(state: AppState, id: string, name: string): SavedL
       swing: state.settings.swing,
       waveform: state.settings.waveform,
       effects: state.settings.effects,
+      bassPreset: state.settings.bassPreset,
       midiEnabled: state.settings.midiEnabled,
       midiPortId: state.settings.midiPortId,
       midiChannel: state.settings.midiChannel,
@@ -3755,6 +3857,12 @@ function bindPerformPanel(shell: HTMLElement): void {
   effectsSelect?.addEventListener("change", () => {
     const effects = normalizeEffects(effectsSelect.value);
     updateSettings({ effects }, `Effects set to ${effects}`);
+  });
+
+  const bassPresetSelect = shell.querySelector<HTMLSelectElement>("select[data-perform-setting='bass-preset']");
+  bassPresetSelect?.addEventListener("change", () => {
+    const bassPreset = normalizeBassPreset(bassPresetSelect.value);
+    updateSettings({ bassPreset }, `Bass set to ${BASS_PRESET_LABELS[bassPreset]}`);
   });
 }
 
