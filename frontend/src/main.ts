@@ -692,7 +692,7 @@ function defaultSettings(): AppSettings {
     showPanel: false,
     showPerformPanel: false,
     showSavedLoopsPanel: false,
-    debugFooterEnabled: true,
+    debugFooterEnabled: false,
     alwaysPlayChords: true,
     centralTone: "C",
     bpm: 96,
@@ -886,7 +886,7 @@ function loadSettings(): AppSettings {
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
     return {
       ...defaults,
-      debugFooterEnabled: parsed.debugFooterEnabled !== false,
+      debugFooterEnabled: parsed.debugFooterEnabled === true,
       alwaysPlayChords: parsed.alwaysPlayChords !== false,
       centralTone: normalizeCentralTone(parsed.centralTone),
       bpm: normalizeBpm(parsed.bpm),
