@@ -2236,7 +2236,7 @@ const nodeVelocities: Record<number, { vx: number; vy: number }> = {};
 let forcePinnedNodeId: number | null = null;
 let forceRafId = 0;
 
-const FORCE_LINK_DIST = 230;
+const FORCE_LINK_DIST_RINGS = 3.3; // multiplier on familyOuter — keeps rings from touching
 const FORCE_SPRING_K = 0.035;
 const FORCE_REPULSION = 6000;
 const FORCE_CENTER = 0.006;
@@ -2257,7 +2257,10 @@ function initMissingNodeOffsets(): void {
   });
 }
 
-function stepForceSimulation(cx: number, cy: number): void {
+function stepForceSimulation(layout: StageLayout): void {
+  const cx = layout.centerX;
+  const cy = layout.centerY;
+  const linkDist = layout.familyOuter * FORCE_LINK_DIST_RINGS;
   const sequence = graphSequence(store.getState().graph);
   if (sequence.length === 0) return;
 
@@ -2282,7 +2285,7 @@ function stepForceSimulation(cx: number, cy: number): void {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const dist = Math.hypot(dx, dy) || 0.01;
-    const delta = dist - FORCE_LINK_DIST;
+    const delta = dist - linkDist;
     const f = delta * FORCE_SPRING_K;
     const ffx = (dx / dist) * f;
     const ffy = (dy / dist) * f;
@@ -2338,7 +2341,7 @@ function runForceLoop(): void {
   const rect = canvas.getBoundingClientRect();
   if (rect.width < 1 || rect.height < 1) return;
   const layout = buildLayout(rect.width, rect.height);
-  stepForceSimulation(layout.centerX, layout.centerY);
+  stepForceSimulation(layout);
   redrawCanvasOnly(canvas);
 }
 
@@ -2861,10 +2864,11 @@ function drawFallback2d(
 
     const ux = dx / len;
     const uy = dy / len;
-    const startX = from.x + ux * (from.radius - 8);
-    const startY = from.y + uy * (from.radius - 8);
-    const endX = to.x - ux * (to.radius - 6);
-    const endY = to.y - uy * (to.radius - 6);
+    const edgeR = layout.familyOuter;
+    const startX = from.x + ux * edgeR;
+    const startY = from.y + uy * edgeR;
+    const endX = to.x - ux * edgeR;
+    const endY = to.y - uy * edgeR;
 
     if (isReturnToHead) {
       const midX = (startX + endX) * 0.5;
@@ -2879,7 +2883,7 @@ function drawFallback2d(
       ctx.moveTo(startX, startY);
       ctx.quadraticCurveTo(controlX, controlY, endX, endY);
       ctx.strokeStyle = fromStyle.returnStroke;
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 4;
       ctx.stroke();
 
       const tx = endX - controlX;
@@ -2889,7 +2893,7 @@ function drawFallback2d(
       const dirY = ty / tLen;
       const nx = -dirY;
       const ny = dirX;
-      const head = 6;
+      const head = 8;
       ctx.beginPath();
       ctx.moveTo(endX, endY);
       ctx.lineTo(endX - dirX * head + nx * head * 0.58, endY - dirY * head + ny * head * 0.58);
@@ -2903,11 +2907,11 @@ function drawFallback2d(
     ctx.beginPath();
     ctx.moveTo(startX, startY);
     ctx.lineTo(endX, endY);
-    ctx.strokeStyle = isReturnToHead ? fromStyle.returnStroke : fromStyle.edgeStroke;
-    ctx.lineWidth = isReturnToHead ? 3 : 2.4;
+    ctx.strokeStyle = fromStyle.edgeStroke;
+    ctx.lineWidth = 3.5;
     ctx.stroke();
 
-    const head = 6;
+    const head = 8;
     const nx = -uy;
     const ny = ux;
     ctx.beginPath();
@@ -2915,7 +2919,7 @@ function drawFallback2d(
     ctx.lineTo(endX - ux * head + nx * head * 0.58, endY - uy * head + ny * head * 0.58);
     ctx.lineTo(endX - ux * head - nx * head * 0.58, endY - uy * head - ny * head * 0.58);
     ctx.closePath();
-    ctx.fillStyle = isReturnToHead ? fromStyle.returnArrowFill : fromStyle.edgeArrowFill;
+    ctx.fillStyle = fromStyle.edgeArrowFill;
     ctx.fill();
     });
 
@@ -2997,14 +3001,16 @@ function drawFallback2d(
       );
     });
 
+    // base sizes mirror CSS clamp minimums; sceneZoom mirrors transform:scale on the HTML overlay
+    const familyFontPx = Math.max(1, Math.round(12.5 * sceneZoom));
+    const chordFontPx = Math.max(1, Math.round(16.8 * sceneZoom));
+
     familySegments.forEach((seg, index) => {
       const familyIndex = familyIndices[index] ?? 0;
       const familyName = shorthand(state.catalog.families[familyIndex]?.name ?? "Family");
       const point = segmentMidpoint(layout, seg, view.x, view.y);
-      ctx.fillStyle = index === selectedFamilySegmentIndex
-        ? "rgba(222, 242, 255, 0.96)"
-        : "rgba(181, 214, 255, 0.86)";
-      ctx.font = "600 10px 'Space Grotesk', sans-serif";
+      ctx.fillStyle = "rgba(139, 182, 255, 0.88)";
+      ctx.font = `400 ${familyFontPx}px 'Space Grotesk', sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(familyName, point.x, point.y);
@@ -3014,10 +3020,8 @@ function drawFallback2d(
       const chord = nodeFamily.chords[index];
       const label = chordLabel(chord?.full_name ?? chord?.numeral ?? "I");
       const point = segmentMidpoint(layout, seg, view.x, view.y);
-      ctx.fillStyle = index === nodeChordIndex
-        ? "rgba(221, 249, 255, 0.98)"
-        : "rgba(165, 208, 255, 0.9)";
-      ctx.font = "500 13px 'Cormorant Garamond', serif";
+      ctx.fillStyle = "rgba(139, 182, 255, 0.88)";
+      ctx.font = `500 ${chordFontPx}px 'Cormorant Garamond', serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(label, point.x, point.y);
@@ -3061,8 +3065,9 @@ function drawFallback2d(
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    ctx.fillStyle = viewStyle.nodeTextFill;
-    ctx.font = "600 11px 'Space Grotesk', sans-serif";
+    const centerFontPx = Math.max(1, Math.round(35.2 * sceneZoom));
+    ctx.fillStyle = "rgba(116, 183, 255, 0.95)";
+    ctx.font = `500 ${centerFontPx}px 'Cormorant Garamond', serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(view.chordName.slice(0, 9), view.x, view.y + 1);
