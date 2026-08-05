@@ -114,6 +114,7 @@ type AppSettings = {
   showPerformPanel: boolean;
   showSavedLoopsPanel: boolean;
   debugFooterEnabled: boolean;
+  alwaysPlayChords: boolean;
   centralTone: string;
   bpm: number;
   timeSignature: TimeSignatureOption;
@@ -691,6 +692,7 @@ function defaultSettings(): AppSettings {
     showPerformPanel: false,
     showSavedLoopsPanel: false,
     debugFooterEnabled: true,
+    alwaysPlayChords: true,
     centralTone: "C",
     bpm: 96,
     timeSignature: "4/4",
@@ -884,6 +886,7 @@ function loadSettings(): AppSettings {
     return {
       ...defaults,
       debugFooterEnabled: parsed.debugFooterEnabled !== false,
+      alwaysPlayChords: parsed.alwaysPlayChords !== false,
       centralTone: normalizeCentralTone(parsed.centralTone),
       bpm: normalizeBpm(parsed.bpm),
       timeSignature: normalizeTimeSignature(parsed.timeSignature),
@@ -2020,6 +2023,10 @@ function buildSettingsPanel(state: AppState): string {
             <input type="checkbox" data-setting="midi-enabled" ${settings.midiEnabled ? "checked" : ""} />
           </label>
           <label class="settings-field inline">
+            <span>Always Play Chords</span>
+            <input type="checkbox" data-setting="always-play-chords" ${settings.alwaysPlayChords ? "checked" : ""} />
+          </label>
+          <label class="settings-field inline">
             <span>Debug Footer</span>
             <input type="checkbox" data-setting="debug-footer-enabled" ${settings.debugFooterEnabled ? "checked" : ""} />
           </label>
@@ -2448,7 +2455,10 @@ function syncSelectionToNode(nodeId: number, status: string, options?: { updateS
   if (match) {
     const chord = state.catalog.families[match.familyIndex]?.chords[match.chordIndex];
     if (chord) {
-      playChordPreview(chord, nodeId);
+      const skipSound = !state.settings.alwaysPlayChords && performPlaying && updateSelection;
+      if (!skipSound) {
+        playChordPreview(chord, nodeId);
+      }
     }
   }
 
@@ -2774,6 +2784,14 @@ function drawFallback2d(
   ctx.lineWidth = 3;
   ctx.stroke();
 
+  if (state.graph.headId === state.graph.selectedNodeId) {
+    ctx.beginPath();
+    ctx.arc(activeCenterX, activeCenterY, layout.familyInner, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255, 178, 60, 0.92)";
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+  }
+
   const pulseStrength = pulseStrengthAt(performance.now());
   if (pulseStrength > 0.001) {
     const pulseNodeView = centerPulseNodeId !== null
@@ -2842,7 +2860,7 @@ function drawFallback2d(
       const loopEnd = Math.PI * 1.7;
       ctx.beginPath();
       ctx.arc(loopCenterX, loopCenterY, loopRadius, loopStart, loopEnd);
-      ctx.strokeStyle = isReturnToHead ? fromStyle.returnStroke : fromStyle.edgeStroke;
+      ctx.strokeStyle = fromStyle.edgeStroke;
       ctx.lineWidth = 2.2;
       ctx.stroke();
 
@@ -2857,7 +2875,7 @@ function drawFallback2d(
       ctx.lineTo(endX - tx * head + ty * head * 0.56, endY - ty * head - tx * head * 0.56);
       ctx.lineTo(endX - tx * head - ty * head * 0.56, endY - ty * head + tx * head * 0.56);
       ctx.closePath();
-      ctx.fillStyle = isReturnToHead ? fromStyle.returnArrowFill : fromStyle.edgeArrowFill;
+      ctx.fillStyle = fromStyle.edgeArrowFill;
       ctx.fill();
       return;
     }
@@ -2869,40 +2887,6 @@ function drawFallback2d(
     const startY = from.y + uy * edgeR;
     const endX = to.x - ux * edgeR;
     const endY = to.y - uy * edgeR;
-
-    if (isReturnToHead) {
-      const midX = (startX + endX) * 0.5;
-      const midY = (startY + endY) * 0.5;
-      const awayX = midX - layout.centerX;
-      const awayY = midY - layout.centerY;
-      const awayLen = Math.hypot(awayX, awayY) || 1;
-      const controlX = midX + (awayX / awayLen) * 120;
-      const controlY = midY + (awayY / awayLen) * 120;
-
-      ctx.beginPath();
-      ctx.moveTo(startX, startY);
-      ctx.quadraticCurveTo(controlX, controlY, endX, endY);
-      ctx.strokeStyle = fromStyle.returnStroke;
-      ctx.lineWidth = 4;
-      ctx.stroke();
-
-      const tx = endX - controlX;
-      const ty = endY - controlY;
-      const tLen = Math.hypot(tx, ty) || 1;
-      const dirX = tx / tLen;
-      const dirY = ty / tLen;
-      const nx = -dirY;
-      const ny = dirX;
-      const head = 8;
-      ctx.beginPath();
-      ctx.moveTo(endX, endY);
-      ctx.lineTo(endX - dirX * head + nx * head * 0.58, endY - dirY * head + ny * head * 0.58);
-      ctx.lineTo(endX - dirX * head - nx * head * 0.58, endY - dirY * head - ny * head * 0.58);
-      ctx.closePath();
-      ctx.fillStyle = fromStyle.returnArrowFill;
-      ctx.fill();
-      return;
-    }
 
     ctx.beginPath();
     ctx.moveTo(startX, startY);
@@ -2921,6 +2905,7 @@ function drawFallback2d(
     ctx.closePath();
     ctx.fillStyle = fromStyle.edgeArrowFill;
     ctx.fill();
+    void isReturnToHead; // retained for potential future use
     });
 
     nodeViews.forEach((view) => {
@@ -3061,9 +3046,17 @@ function drawFallback2d(
     ctx.arc(view.x, view.y, layout.centerRadius * nodeScale, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(6, 14, 31, 0.95)";
     ctx.fill();
-    ctx.strokeStyle = isHead ? viewStyle.headNodeStroke : viewStyle.nodeStroke;
+    ctx.strokeStyle = viewStyle.nodeStroke;
     ctx.lineWidth = 2;
     ctx.stroke();
+
+    if (isHead) {
+      ctx.beginPath();
+      ctx.arc(view.x, view.y, layout.familyInner * nodeScale, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255, 178, 60, 0.92)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
 
     const centerFontPx = Math.max(1, Math.round(35.2 * sceneZoom));
     ctx.fillStyle = "rgba(116, 183, 255, 0.95)";
@@ -3127,7 +3120,9 @@ function selectChord(index: number): void {
   const chosen = family.chords[next];
 
   if (chosen) {
-    playChordPreview(chosen);
+    if (state.settings.alwaysPlayChords || !performPlaying) {
+      playChordPreview(chosen);
+    }
   }
 
   const updatedGraph = chosen?.full_name
@@ -3563,6 +3558,12 @@ function bindSettingsPanel(shell: HTMLElement): void {
   debugToggle?.addEventListener("change", () => {
     const enabled = debugToggle.checked;
     updateSettings({ debugFooterEnabled: enabled }, enabled ? "Debug footer enabled" : "Debug footer disabled");
+  });
+
+  const alwaysPlayToggle = shell.querySelector<HTMLInputElement>("input[data-setting='always-play-chords']");
+  alwaysPlayToggle?.addEventListener("change", () => {
+    const enabled = alwaysPlayToggle.checked;
+    updateSettings({ alwaysPlayChords: enabled }, enabled ? "Always play chords on" : "Always play chords off");
   });
 }
 
