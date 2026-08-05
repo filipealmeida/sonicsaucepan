@@ -284,9 +284,10 @@ type MidiOutputLike = {
 
 type MidiAccessLike = {
   outputs?: {
+    get?: (id: string) => MidiOutputLike | undefined;
     forEach?: (callback: (value: MidiOutputLike) => void) => void;
     [Symbol.iterator]?: () => Iterator<[string, MidiOutputLike]>;
-    values?: () => Iterator<MidiOutputLike>;
+    values?: () => IterableIterator<MidiOutputLike>;
   };
   onstatechange: ((event: Event) => void) | null;
 };
@@ -1371,6 +1372,34 @@ function getAudioContext(): AudioContext {
   return audioContextRef;
 }
 
+function resolveMidiOutput(portId: string): MidiOutputLike | null {
+  const outputs = midiAccessRef?.outputs;
+  if (!outputs) {
+    return null;
+  }
+  if (outputs.get) {
+    return outputs.get(portId) ?? null;
+  }
+  // forEach fallback for environments without .get()
+  let found: MidiOutputLike | null = null;
+  outputs.forEach?.((output) => {
+    if (output.id === portId) {
+      found = output;
+    }
+  });
+  if (found) {
+    return found;
+  }
+  if (outputs.values) {
+    for (const output of outputs.values()) {
+      if (output.id === portId) {
+        return output;
+      }
+    }
+  }
+  return null;
+}
+
 function sendMidiPreview(chord: ChordEntry, sustainMs = 920): void {
   const state = store.getState();
   const settings = state.settings;
@@ -1378,20 +1407,14 @@ function sendMidiPreview(chord: ChordEntry, sustainMs = 920): void {
     return;
   }
 
-  const outputs = midiAccessRef?.outputs;
-  if (!outputs?.values) {
+  if (!midiAccessRef) {
+    appendDebugLog(`[midi] skipped — no MIDI access (enable MIDI in settings)`);
     return;
   }
 
-  let selectedOutput: MidiOutputLike | null = null;
-  for (const output of outputs.values()) {
-    if (output.id === settings.midiPortId) {
-      selectedOutput = output;
-      break;
-    }
-  }
-
+  const selectedOutput = resolveMidiOutput(settings.midiPortId);
   if (!selectedOutput) {
+    appendDebugLog(`[midi] port not found: ${settings.midiPortId}`);
     return;
   }
 
@@ -1400,13 +1423,15 @@ function sendMidiPreview(chord: ChordEntry, sustainMs = 920): void {
   const noteOn = 0x90 + channel;
   const noteOff = 0x80 + channel;
 
+  appendDebugLog(`[midi] ch${channel + 1} ${chord.full_name} notes=[${midiNotes.join(',')}] port=${selectedOutput.name ?? settings.midiPortId}`);
+
   midiNotes.forEach((note) => {
-    selectedOutput?.send([noteOn, note, 96]);
+    selectedOutput.send([noteOn, note, 96]);
   });
 
   window.setTimeout(() => {
     midiNotes.forEach((note) => {
-      selectedOutput?.send([noteOff, note, 0]);
+      selectedOutput.send([noteOff, note, 0]);
     });
   }, Math.max(100, sustainMs - 80));
 }
