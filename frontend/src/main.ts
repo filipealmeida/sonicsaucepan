@@ -2151,7 +2151,7 @@ function buildSettingsPanel(state: AppState): string {
   return `
     <div class="settings-modal ${settings.showPanel ? "open" : ""}" aria-hidden="${settings.showPanel ? "false" : "true"}">
       <button class="settings-backdrop" data-settings-action="close" aria-label="Close settings"></button>
-      <section class="settings-panel" role="dialog" aria-modal="true" aria-label="Settings">
+      <section class="settings-panel" role="dialog" aria-modal="true" tabindex="-1" aria-label="Settings">
         <header class="settings-header">
           <h2>Settings</h2>
           <button class="settings-close" data-settings-action="close" aria-label="Close settings">×</button>
@@ -2212,7 +2212,7 @@ function buildPerformPanel(state: AppState): string {
   return `
     <div class="settings-modal perform-modal ${settings.showPerformPanel ? "open" : ""}" aria-hidden="${settings.showPerformPanel ? "false" : "true"}">
       <button class="settings-backdrop" data-perform-action="close" aria-label="Close perform options"></button>
-      <section class="settings-panel" role="dialog" aria-modal="true" aria-label="Perform options">
+      <section class="settings-panel" role="dialog" aria-modal="true" tabindex="-1" aria-label="Perform options">
         <header class="settings-header">
           <h2>Perform Options</h2>
           <button class="settings-close" data-perform-action="close" aria-label="Close perform options">×</button>
@@ -2223,7 +2223,7 @@ function buildPerformPanel(state: AppState): string {
             <select data-perform-setting="central-tone">${toneOptions}</select>
           </label>
           <label class="settings-field">
-            <span>BPM (${settings.bpm})</span>
+            <span data-live-label="bpm">BPM (${settings.bpm})</span>
             <input type="range" min="60" max="240" step="1" value="${settings.bpm}" data-perform-setting="bpm" />
           </label>
           <label class="settings-field">
@@ -2235,7 +2235,7 @@ function buildPerformPanel(state: AppState): string {
             <select data-perform-setting="beats-per-chord">${beatsPerChordOptions}</select>
           </label>
           <label class="settings-field">
-            <span>Swing (${settings.swing}%)</span>
+            <span data-live-label="swing">Swing (${settings.swing}%)</span>
             <input type="range" min="0" max="75" step="1" value="${settings.swing}" data-perform-setting="swing" />
           </label>
           <label class="settings-field">
@@ -2280,7 +2280,7 @@ function buildSavedLoopsPanel(state: AppState): string {
   return `
     <div class="settings-modal saved-loops-modal ${settings.showSavedLoopsPanel ? "open" : ""}" aria-hidden="${settings.showSavedLoopsPanel ? "false" : "true"}">
       <button class="settings-backdrop" data-saved-loops-action="close" aria-label="Close saved loops"></button>
-      <section class="settings-panel" role="dialog" aria-modal="true" aria-label="Saved loops">
+      <section class="settings-panel" role="dialog" aria-modal="true" tabindex="-1" aria-label="Saved loops">
         <header class="settings-header">
           <h2>Saved Loops</h2>
           <button class="settings-close" data-saved-loops-action="close" aria-label="Close saved loops">×</button>
@@ -3663,10 +3663,6 @@ function bindCornerControls(shell: HTMLElement): void {
     longPressFired = false;
     longPressTimer = window.setTimeout(() => {
       longPressFired = true;
-      const state = store.getState();
-      if (!state.settings.showPerformPanel) {
-        handleModalOpened();
-      }
       updateSettings({ showPerformPanel: true }, "Perform options opened");
     }, 560);
   });
@@ -3819,10 +3815,6 @@ function bindDebugFooter(shell: HTMLElement): void {
 function bindPerformPanel(shell: HTMLElement): void {
   shell.querySelectorAll<HTMLElement>("[data-perform-action='close']").forEach((element) => {
     element.addEventListener("click", () => {
-      const state = store.getState();
-      if (state.settings.showPerformPanel) {
-        handleModalClosed();
-      }
       updateSettings({ showPerformPanel: false }, "Perform options closed");
     });
   });
@@ -4273,20 +4265,64 @@ function mountStage(): void {
   stage.setScene(state, layout, geometry);
 }
 
+let prevModalKey = "";
+
 function render(): void {
   const state = store.getState();
   const currentStatus = !FORCE_CANVAS_RENDERER && webglUnavailable
     ? "WebGL unavailable in this embedded preview; open in a GPU-enabled browser to see the full scene"
     : state.status;
 
-  const stateForRender = {
-    ...state,
-    status: currentStatus,
-  };
+  const stateForRender = { ...state, status: currentStatus };
+  const anyModalOpen = state.settings.showPanel || state.settings.showPerformPanel || state.settings.showSavedLoopsPanel;
+  const modalKey = `${state.settings.showPanel}-${state.settings.showPerformPanel}-${state.settings.showSavedLoopsPanel}`;
+  const shellExists = !!root.querySelector(".stage-shell");
+
+  // When a modal is already open and its visibility didn't change, skip full
+  // innerHTML re-render to preserve open <select> dropdowns and focused inputs.
+  if (anyModalOpen && shellExists && modalKey === prevModalKey) {
+    const canvas = root.querySelector<HTMLCanvasElement>(".webgl-stage");
+    if (canvas) redrawCanvasOnly(canvas);
+    const performBtn = root.querySelector<HTMLButtonElement>(".corner-btn.perform");
+    if (performBtn) {
+      performBtn.textContent = performPlaying ? "❚❚" : "▶";
+      performBtn.classList.toggle("playing", performPlaying);
+      performBtn.classList.toggle("paused", !performPlaying);
+    }
+    // Patch dynamic label text inside the open modal without rebuilding its DOM.
+    const s = state.settings;
+    const bpmLabel = root.querySelector<HTMLElement>("[data-live-label='bpm']");
+    if (bpmLabel) bpmLabel.textContent = `BPM (${s.bpm})`;
+    const swingLabel = root.querySelector<HTMLElement>("[data-live-label='swing']");
+    if (swingLabel) swingLabel.textContent = `Swing (${s.swing}%)`;
+    return;
+  }
+
+  prevModalKey = modalKey;
 
   const placeholderLayout = buildLayout(window.innerWidth, window.innerHeight);
   const geometry = buildSceneGeometry(stateForRender, placeholderLayout);
   overlay(root, stateForRender, placeholderLayout, geometry);
+
+  // Trap focus inside open modals by marking background as inert.
+  const bgElements = [
+    root.querySelector<HTMLElement>(".webgl-stage"),
+    root.querySelector<HTMLElement>(".overlay"),
+    root.querySelector<HTMLElement>(".corner-controls"),
+    root.querySelector<HTMLElement>(".debug-footer"),
+  ];
+  for (const el of bgElements) {
+    if (!el) continue;
+    if (anyModalOpen) el.setAttribute("inert", "");
+    else el.removeAttribute("inert");
+  }
+  if (anyModalOpen) {
+    const openPanel = root.querySelector<HTMLElement>(".settings-modal.open .settings-panel");
+    if (openPanel && !openPanel.contains(document.activeElement)) {
+      const first = openPanel.querySelector<HTMLElement>("button,input,select,[tabindex]");
+      (first ?? openPanel).focus();
+    }
+  }
 
   mountStage();
 }

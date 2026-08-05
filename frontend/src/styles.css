@@ -395,6 +395,8 @@ body {
   top: 50%;
   left: 50%;
   width: min(92vw, 460px);
+  max-height: min(92dvh, 92vh);
+  overflow-y: auto;
   transform: translate(-50%, -50%);
   border-radius: 18px;
   border: 1px solid rgba(119, 176, 255, 0.36);
@@ -403,6 +405,7 @@ body {
     0 24px 60px rgba(0, 0, 0, 0.52),
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
   padding: 14px 14px 16px;
+  outline: none;
 }
 
 .settings-header {
