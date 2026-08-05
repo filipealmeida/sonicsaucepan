@@ -2232,6 +2232,115 @@ let resumePerformAfterModalClose = false;
 let debugFooterDraft = "";
 let restoreDebugInputFocus = false;
 const nodeOffsets: Record<number, { x: number; y: number }> = { ...initialNodeOffsets };
+const nodeVelocities: Record<number, { vx: number; vy: number }> = {};
+let forcePinnedNodeId: number | null = null;
+let forceRafId = 0;
+
+const FORCE_LINK_DIST = 230;
+const FORCE_SPRING_K = 0.035;
+const FORCE_REPULSION = 6000;
+const FORCE_CENTER = 0.006;
+const FORCE_DAMPING = 0.80;
+
+function initMissingNodeOffsets(): void {
+  const sequence = graphSequence(store.getState().graph);
+  const count = sequence.length;
+  sequence.forEach((node, i) => {
+    if (!nodeOffsets[node.id]) {
+      const angle = count > 1 ? (i / count) * Math.PI * 2 - Math.PI * 0.5 : 0;
+      const r = count > 1 ? clamp(count * 55, 80, 300) : 0;
+      nodeOffsets[node.id] = {
+        x: Math.cos(angle) * r + (Math.random() - 0.5) * 30,
+        y: Math.sin(angle) * r + (Math.random() - 0.5) * 30,
+      };
+    }
+  });
+}
+
+function stepForceSimulation(cx: number, cy: number): void {
+  const sequence = graphSequence(store.getState().graph);
+  if (sequence.length === 0) return;
+
+  const pos: Record<number, { x: number; y: number }> = {};
+  for (const node of sequence) {
+    if (!nodeOffsets[node.id]) nodeOffsets[node.id] = { x: (Math.random() - 0.5) * 60, y: (Math.random() - 0.5) * 60 };
+    const o = nodeOffsets[node.id];
+    pos[node.id] = { x: cx + o.x, y: cy + o.y };
+    if (!nodeVelocities[node.id]) nodeVelocities[node.id] = { vx: 0, vy: 0 };
+  }
+
+  const fx: Record<number, number> = {};
+  const fy: Record<number, number> = {};
+  for (const node of sequence) { fx[node.id] = 0; fy[node.id] = 0; }
+
+  // spring forces along each directed edge
+  for (const node of sequence) {
+    if (node.nextId === node.id) continue; // skip self-loop
+    const a = pos[node.id];
+    const b = pos[node.nextId];
+    if (!a || !b) continue;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy) || 0.01;
+    const delta = dist - FORCE_LINK_DIST;
+    const f = delta * FORCE_SPRING_K;
+    const ffx = (dx / dist) * f;
+    const ffy = (dy / dist) * f;
+    fx[node.id] += ffx;
+    fy[node.id] += ffy;
+    if (fx[node.nextId] !== undefined) { fx[node.nextId] -= ffx; fy[node.nextId] -= ffy; }
+  }
+
+  // repulsion between all pairs
+  for (let i = 0; i < sequence.length; i++) {
+    for (let j = i + 1; j < sequence.length; j++) {
+      const a = pos[sequence[i].id];
+      const b = pos[sequence[j].id];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const dist2 = Math.max(dx * dx + dy * dy, 1);
+      const dist = Math.sqrt(dist2);
+      const f = FORCE_REPULSION / dist2;
+      fx[sequence[i].id] -= (dx / dist) * f;
+      fy[sequence[i].id] -= (dy / dist) * f;
+      fx[sequence[j].id] += (dx / dist) * f;
+      fy[sequence[j].id] += (dy / dist) * f;
+    }
+  }
+
+  // centering toward centroid
+  let sumX = 0;
+  let sumY = 0;
+  for (const node of sequence) { sumX += pos[node.id].x; sumY += pos[node.id].y; }
+  const centX = sumX / sequence.length;
+  const centY = sumY / sequence.length;
+  for (const node of sequence) {
+    fx[node.id] += (cx - centX) * FORCE_CENTER;
+    fy[node.id] += (cy - centY) * FORCE_CENTER;
+  }
+
+  // integrate velocities and positions
+  for (const node of sequence) {
+    if (node.id === forcePinnedNodeId) { nodeVelocities[node.id] = { vx: 0, vy: 0 }; continue; }
+    const vel = nodeVelocities[node.id]!;
+    vel.vx = (vel.vx + fx[node.id]) * FORCE_DAMPING;
+    vel.vy = (vel.vy + fy[node.id]) * FORCE_DAMPING;
+    const o = nodeOffsets[node.id]!;
+    o.x += vel.vx;
+    o.y += vel.vy;
+  }
+}
+
+function runForceLoop(): void {
+  const canvas = root.querySelector<HTMLCanvasElement>(".webgl-stage");
+  forceRafId = window.requestAnimationFrame(runForceLoop);
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return;
+  const layout = buildLayout(rect.width, rect.height);
+  stepForceSimulation(layout.centerX, layout.centerY);
+  redrawCanvasOnly(canvas);
+}
 
 activeSavedLoopId = store.getState().savedLoopSelectedId;
 activeSavedLoopSignature = currentLoopStateSignature(store.getState());
@@ -2408,10 +2517,9 @@ function handleModalClosed(): void {
 function buildGraphNodeViews(state: AppState, layout: StageLayout): GraphNodeView[] {
   const sequence = graphSequence(state.graph);
   const selectedId = state.graph.selectedNodeId;
-  const laneSpacing = clamp(layout.width * 0.32, 220, 360);
   const views: GraphNodeView[] = [];
 
-  sequence.forEach((node, index) => {
+  sequence.forEach((node) => {
     const offset = nodeOffsets[node.id] ?? { x: 0, y: 0 };
     const isSelected = node.id === selectedId;
     const radius = layout.chordOuter;
@@ -2419,7 +2527,7 @@ function buildGraphNodeViews(state: AppState, layout: StageLayout): GraphNodeVie
     views.push({
       nodeId: node.id,
       type: node.type,
-      x: layout.centerX + index * laneSpacing + offset.x,
+      x: layout.centerX + offset.x,
       y: layout.centerY + offset.y,
       radius,
       isSelected,
@@ -2486,6 +2594,7 @@ function trimNodeOffsets(graph: LoopGraph): void {
   for (const key of Object.keys(nodeOffsets)) {
     if (!validIds.has(key)) {
       delete nodeOffsets[key];
+      delete nodeVelocities[Number(key)];
     }
   }
 }
@@ -2908,7 +3017,7 @@ function drawFallback2d(
       ctx.fillStyle = index === nodeChordIndex
         ? "rgba(221, 249, 255, 0.98)"
         : "rgba(165, 208, 255, 0.9)";
-      ctx.font = "600 11px 'Space Grotesk', sans-serif";
+      ctx.font = "500 13px 'Cormorant Garamond', serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(label, point.x, point.y);
@@ -3037,6 +3146,13 @@ function addNode(): void {
   const previousCount = graphSequence(state.graph).length;
   const insertedNodeId = state.graph.nextNodeId;
   const graph = addAfterSelected(state.graph, sourceChordName);
+  // place new node near its predecessor with a small random kick
+  const predOffset = nodeOffsets[previousSelectedId] ?? { x: 0, y: 0 };
+  nodeOffsets[insertedNodeId] = {
+    x: predOffset.x + (Math.random() - 0.5) * 80,
+    y: predOffset.y + (Math.random() - 0.5) * 80,
+  };
+  nodeVelocities[insertedNodeId] = { vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4 };
   trimNodeOffsets(graph);
   saveGraph(graph);
   const nextCount = graphSequence(graph).length;
@@ -3673,6 +3789,8 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
 
     if (pressContext.mode === "drag-node" && pressContext.targetNodeId !== null) {
       const nodeId = pressContext.targetNodeId;
+      forcePinnedNodeId = nodeId;
+      nodeVelocities[nodeId] = { vx: 0, vy: 0 };
       const nodeOffset = nodeOffsets[nodeId] ?? { x: 0, y: 0 };
       const deltaX = event.clientX - pressContext.lastX;
       const deltaY = event.clientY - pressContext.lastY;
@@ -3701,6 +3819,7 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
 
     const point = pointerToCanvas(canvas, event);
     if (pressContext.mode === "drag-node") {
+      forcePinnedNodeId = null;
       const draggedNodeId = pressContext.targetNodeId;
       if (draggedNodeId !== null && pressContext.moved) {
         const finalOffset = nodeOffsets[draggedNodeId] ?? { x: 0, y: 0 };
@@ -3886,10 +4005,12 @@ function animate(now: number): void {
 store.subscribe(render);
 store.subscribe(saveInteractionState);
 render();
+initMissingNodeOffsets();
 
 if (!FORCE_CANVAS_RENDERER) {
   rafId = window.requestAnimationFrame(animate);
 }
+forceRafId = window.requestAnimationFrame(runForceLoop);
 
 window.addEventListener("beforeunload", () => {
   saveInteractionState();
@@ -3900,6 +4021,10 @@ window.addEventListener("beforeunload", () => {
   }
   if (rafId) {
     window.cancelAnimationFrame(rafId);
+  }
+  if (forceRafId) {
+    window.cancelAnimationFrame(forceRafId);
+    forceRafId = 0;
   }
   resizeObserver?.disconnect();
 });
