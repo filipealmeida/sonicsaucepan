@@ -661,6 +661,42 @@ function randomLoopName(): string {
   return `${a}_${b}`;
 }
 
+function loopNameKey(name: string): string {
+  return name.trim().toLocaleLowerCase();
+}
+
+function findSavedLoopByName(
+  loops: SavedLoopRecord[],
+  name: string,
+  excludedId?: string | null,
+): SavedLoopRecord | null {
+  const key = loopNameKey(name);
+  if (!key) {
+    return null;
+  }
+
+  return loops.find((loop) => loop.id !== excludedId && loopNameKey(loop.name) === key) ?? null;
+}
+
+function nextGeneratedLoopName(loops: SavedLoopRecord[], excludedId?: string | null): string {
+  for (let attempt = 0; attempt < 128; attempt += 1) {
+    const candidate = randomLoopName();
+    if (!findSavedLoopByName(loops, candidate, excludedId)) {
+      return candidate;
+    }
+  }
+
+  const baseName = randomLoopName();
+  for (let suffix = 2; suffix < 10000; suffix += 1) {
+    const candidate = `${baseName}_${suffix}`;
+    if (!findSavedLoopByName(loops, candidate, excludedId)) {
+      return candidate;
+    }
+  }
+
+  return `${baseName}_${Date.now()}`;
+}
+
 function cloneGraph(graph: LoopGraph): LoopGraph {
   return JSON.parse(JSON.stringify(graph)) as LoopGraph;
 }
@@ -3422,12 +3458,20 @@ function cycleSelectedNode(): void {
 }
 
 function resetCurrentStateToInitialNode(): void {
+  let state = store.getState();
+  if (shouldPromptToSaveCurrent(state)) {
+    const shouldSave = window.confirm("Save current state before resetting to the initial node?");
+    if (shouldSave) {
+      saveCurrentLoopState();
+      state = store.getState();
+    }
+  }
+
   stopPerformLoop();
   performCursorNodeId = null;
 
-  const state = store.getState();
   const initialChord = initialChordName(state.catalog);
-  const nextLoopName = randomLoopName();
+  const nextLoopName = nextGeneratedLoopName(state.savedLoops);
   const graph = createInitialGraph(initialChord);
   const match = findChordInCatalog(state.catalog, initialChord);
 
@@ -3451,6 +3495,8 @@ function resetCurrentStateToInitialNode(): void {
   });
   activeSavedLoopId = null;
   activeSavedLoopSignature = currentLoopStateSignature(store.getState());
+  restoreSavedLoopNameFocus = true;
+  savedLoopNameCursor = nextLoopName.length;
   appendDebugLog(`[ui] reset state -> nodeCount=${graphSequence(graph).length} chord="${initialChord}" name="${nextLoopName}"`);
 }
 
@@ -3492,13 +3538,34 @@ function buildSavedLoopRecord(state: AppState, id: string, name: string): SavedL
   };
 }
 
+function currentSavedLoopDraftValue(state: AppState): string {
+  const liveInputValue = root?.querySelector<HTMLInputElement>("input[data-saved-loop-input='name']")?.value;
+  if (typeof liveInputValue === "string") {
+    return liveInputValue;
+  }
+  return state.savedLoopDraft;
+}
+
 function saveCurrentLoopState(): void {
   const state = store.getState();
-  const rawName = state.savedLoopDraft.trim();
-  const name = rawName.length > 0 ? rawName : randomLoopName();
-  const id = `loop-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  const selectedLoop = state.savedLoops.find((loop) => loop.id === state.savedLoopSelectedId) ?? null;
+  const draftValue = currentSavedLoopDraftValue(state);
+  const rawName = draftValue.trim();
+  const name = rawName.length > 0
+    ? rawName
+    : nextGeneratedLoopName(state.savedLoops, selectedLoop?.id ?? null);
+  const conflictingLoop = findSavedLoopByName(state.savedLoops, name, selectedLoop?.id ?? null);
+
+  if (conflictingLoop && !window.confirm(`A saved loop named "${name}" already exists. Overwrite it?`)) {
+    restoreSavedLoopNameFocus = true;
+    savedLoopNameCursor = name.length;
+    return;
+  }
+
+  const targetLoop = conflictingLoop ?? selectedLoop;
+  const id = targetLoop?.id ?? `loop-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const nextRecord = buildSavedLoopRecord(state, id, name);
-  const savedLoops = [nextRecord, ...state.savedLoops];
+  const savedLoops = [nextRecord, ...state.savedLoops.filter((loop) => loop.id !== id)];
   const pageCount = Math.max(1, Math.ceil(savedLoops.length / SAVED_LOOPS_PAGE_SIZE));
 
   saveSavedLoops(savedLoops);
@@ -3636,19 +3703,22 @@ function bindCornerControls(shell: HTMLElement): void {
       handleModalOpened();
     }
     const selectedLoop = state.savedLoops.find((loop) => loop.id === state.savedLoopSelectedId);
+    let nextDraft = state.savedLoopDraft;
     if (selectedLoop) {
+      nextDraft = selectedLoop.name;
       store.setState({
         ...state,
-        savedLoopDraft: selectedLoop.name,
+        savedLoopDraft: nextDraft,
       });
     } else if (!state.savedLoopDraft.trim()) {
+      nextDraft = nextGeneratedLoopName(state.savedLoops);
       store.setState({
         ...state,
-        savedLoopDraft: randomLoopName(),
+        savedLoopDraft: nextDraft,
       });
     }
     restoreSavedLoopNameFocus = true;
-    savedLoopNameCursor = (selectedLoop?.name ?? state.savedLoopDraft).length;
+    savedLoopNameCursor = nextDraft.length;
     updateSettings({ showSavedLoopsPanel: true }, "Saved loops opened");
   });
 
@@ -3820,8 +3890,12 @@ function bindPerformPanel(shell: HTMLElement): void {
   });
 
   const bpmInput = shell.querySelector<HTMLInputElement>("input[data-perform-setting='bpm']");
+  const bpmLabel = shell.querySelector<HTMLElement>("[data-live-label='bpm']");
   bpmInput?.addEventListener("input", () => {
     const bpm = normalizeBpm(bpmInput.value);
+    if (bpmLabel) {
+      bpmLabel.textContent = `BPM (${bpm})`;
+    }
     updateSettings({ bpm }, `Tempo set to ${bpm} BPM`);
   });
 
@@ -3843,8 +3917,12 @@ function bindPerformPanel(shell: HTMLElement): void {
   });
 
   const swingInput = shell.querySelector<HTMLInputElement>("input[data-perform-setting='swing']");
+  const swingLabel = shell.querySelector<HTMLElement>("[data-live-label='swing']");
   swingInput?.addEventListener("input", () => {
     const swing = normalizeSwing(swingInput.value);
+    if (swingLabel) {
+      swingLabel.textContent = `Swing (${swing}%)`;
+    }
     updateSettings({ swing }, `Swing set to ${swing}%`);
   });
 
@@ -4277,10 +4355,14 @@ function render(): void {
   const anyModalOpen = state.settings.showPanel || state.settings.showPerformPanel || state.settings.showSavedLoopsPanel;
   const modalKey = `${state.settings.showPanel}-${state.settings.showPerformPanel}-${state.settings.showSavedLoopsPanel}`;
   const shellExists = !!root.querySelector(".stage-shell");
+  const canUseModalFastPath = anyModalOpen
+    && shellExists
+    && modalKey === prevModalKey
+    && !state.settings.showSavedLoopsPanel;
 
   // When a modal is already open and its visibility didn't change, skip full
   // innerHTML re-render to preserve open <select> dropdowns and focused inputs.
-  if (anyModalOpen && shellExists && modalKey === prevModalKey) {
+  if (canUseModalFastPath) {
     const canvas = root.querySelector<HTMLCanvasElement>(".webgl-stage");
     if (canvas) redrawCanvasOnly(canvas);
     const performBtn = root.querySelector<HTMLButtonElement>(".corner-btn.perform");
@@ -4293,8 +4375,22 @@ function render(): void {
     const s = state.settings;
     const bpmLabel = root.querySelector<HTMLElement>("[data-live-label='bpm']");
     if (bpmLabel) bpmLabel.textContent = `BPM (${s.bpm})`;
+    const bpmInput = root.querySelector<HTMLInputElement>("input[data-perform-setting='bpm']");
+    if (bpmInput && bpmInput.value !== String(s.bpm)) bpmInput.value = String(s.bpm);
     const swingLabel = root.querySelector<HTMLElement>("[data-live-label='swing']");
     if (swingLabel) swingLabel.textContent = `Swing (${s.swing}%)`;
+    const swingInput = root.querySelector<HTMLInputElement>("input[data-perform-setting='swing']");
+    if (swingInput && swingInput.value !== String(s.swing)) swingInput.value = String(s.swing);
+    const savedLoopNameInput = root.querySelector<HTMLInputElement>("input[data-saved-loop-input='name']");
+    if (savedLoopNameInput && savedLoopNameInput.value !== state.savedLoopDraft) {
+      savedLoopNameInput.value = state.savedLoopDraft;
+    }
+    if (savedLoopNameInput && restoreSavedLoopNameFocus) {
+      savedLoopNameInput.focus();
+      const cursor = clamp(savedLoopNameCursor, 0, savedLoopNameInput.value.length);
+      savedLoopNameInput.setSelectionRange(cursor, cursor);
+      restoreSavedLoopNameFocus = false;
+    }
     return;
   }
 
