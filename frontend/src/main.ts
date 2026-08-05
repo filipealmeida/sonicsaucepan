@@ -7,6 +7,7 @@ type ChordEntry = {
   full_name: string;
   intervals?: Array<number | string>;
   root?: string | null;
+  tones?: string[];
 };
 
 type ChordFamily = {
@@ -910,6 +911,7 @@ function saveSettings(settings: AppSettings): void {
   try {
     const persisted = {
       debugFooterEnabled: settings.debugFooterEnabled,
+      alwaysPlayChords: settings.alwaysPlayChords,
       centralTone: settings.centralTone,
       bpm: settings.bpm,
       timeSignature: settings.timeSignature,
@@ -955,6 +957,9 @@ function normalizeRootToken(rootText: string): string {
 }
 
 function chordTonesFromIntervals(chord: ChordEntry, centralTone: string): string[] {
+  if (Array.isArray(chord.tones) && chord.tones.length > 0) {
+    return chord.tones;
+  }
   const rootTokenRaw = typeof chord.root === "string" && chord.root.trim().length > 0
     ? chord.root
     : (chord.full_name.match(/^([A-Ga-g][#b]?)/)?.[1] ?? centralTone);
@@ -979,7 +984,48 @@ function chordTonesFromIntervals(chord: ChordEntry, centralTone: string): string
   return unique.map((step) => semitoneToNote(rootSemitone + step, preferFlats));
 }
 
+function tonesToMidi(tones: string[]): number[] {
+  const result: number[] = [];
+  const lastMidiPerSemitone: Record<number, number> = {};
+  let prevMidi = -1;
+  for (const tone of tones) {
+    const semitone = noteToSemitone(normalizeRootToken(tone.trim()));
+    if (semitone === null) continue;
+    let midi: number;
+    if (lastMidiPerSemitone[semitone] !== undefined) {
+      // repetition: exactly one octave above its previous occurrence
+      midi = lastMidiPerSemitone[semitone] + 12;
+    } else {
+      midi = 60 + semitone; // anchor at C4
+      if (prevMidi >= 0 && midi <= prevMidi) midi += 12;
+    }
+    lastMidiPerSemitone[semitone] = midi;
+    result.push(midi);
+    prevMidi = midi;
+  }
+  return result;
+}
+
 function chordToMidi(chord: ChordEntry): number[] {
+  if (Array.isArray(chord.tones) && chord.tones.length > 0) {
+    return tonesToMidi(chord.tones);
+  }
+
+  // When root is an explicit tone and intervals are defined, use them directly.
+  // interval 1 = root (0 semitones), interval N = N-1 semitones above root.
+  if (typeof chord.root === "string" && chord.root.trim().length > 0 && Array.isArray(chord.intervals) && chord.intervals.length > 0) {
+    const rootSemitone = noteToSemitone(normalizeRootToken(chord.root.trim()));
+    if (rootSemitone !== null) {
+      const steps = chord.intervals
+        .map((v) => Number(v))
+        .filter((v) => Number.isFinite(v) && v >= 1)
+        .map((v) => Math.floor(v) - 1);
+      const deduped = [...new Set(steps)].sort((a, b) => a - b);
+      const rootMidi = 60 + rootSemitone;
+      return deduped.map((step) => rootMidi + step);
+    }
+  }
+
   const rootToken = chord.root ?? chord.full_name;
   const rootMatch = rootToken.trim().match(/^([A-Ga-g])([#b]?)/);
   if (!rootMatch) {
