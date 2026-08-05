@@ -2422,12 +2422,12 @@ function initMissingNodeOffsets(): void {
   });
 }
 
-function stepForceSimulation(layout: StageLayout): void {
+function stepForceSimulation(layout: StageLayout): number {
   const cx = layout.centerX;
   const cy = layout.centerY;
   const linkDist = layout.familyOuter * FORCE_LINK_DIST_RINGS;
   const sequence = graphSequence(store.getState().graph);
-  if (sequence.length === 0) return;
+  if (sequence.length === 0) return 0;
 
   const pos: Record<number, { x: number; y: number }> = {};
   for (const node of sequence) {
@@ -2487,27 +2487,36 @@ function stepForceSimulation(layout: StageLayout): void {
     fy[node.id] += (cy - centY) * FORCE_CENTER;
   }
 
-  // integrate velocities and positions
+  // integrate velocities and positions; return total kinetic energy
+  let totalKE = 0;
   for (const node of sequence) {
     if (node.id === forcePinnedNodeId) { nodeVelocities[node.id] = { vx: 0, vy: 0 }; continue; }
     const vel = nodeVelocities[node.id]!;
     vel.vx = (vel.vx + fx[node.id]) * FORCE_DAMPING;
     vel.vy = (vel.vy + fy[node.id]) * FORCE_DAMPING;
+    totalKE += vel.vx * vel.vx + vel.vy * vel.vy;
     const o = nodeOffsets[node.id]!;
     o.x += vel.vx;
     o.y += vel.vy;
   }
+  return totalKE;
 }
 
 function runForceLoop(): void {
   const canvas = root.querySelector<HTMLCanvasElement>(".webgl-stage");
-  forceRafId = window.requestAnimationFrame(runForceLoop);
-  if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  if (rect.width < 1 || rect.height < 1) return;
-  const layout = buildLayout(rect.width, rect.height);
-  stepForceSimulation(layout);
-  redrawCanvasOnly(canvas);
+  const rect = canvas?.getBoundingClientRect();
+  if (canvas && rect && rect.width >= 1 && rect.height >= 1) {
+    const layout = buildLayout(rect.width, rect.height);
+    const ke = stepForceSimulation(layout);
+    if (ke > 0.05) {
+      redrawCanvasOnly(canvas);
+      forceRafId = window.requestAnimationFrame(runForceLoop);
+      return;
+    }
+    redrawCanvasOnly(canvas);
+  }
+  // Nodes settled — poll slowly to stay responsive to external state changes.
+  forceRafId = window.setTimeout(runForceLoop, 200) as unknown as number;
 }
 
 activeSavedLoopId = store.getState().savedLoopSelectedId;
@@ -2652,7 +2661,7 @@ function performStep(): void {
   const isChordBoundary = performStepCount % stepsPerChord === 0;
   if (isChordBoundary) {
     if (performCursorNodeId === null || !graph.nodes[performCursorNodeId]) {
-      performCursorNodeId = graph.selectedNodeId;
+      performCursorNodeId = graph.headId;
     } else {
       performCursorNodeId = graph.nodes[performCursorNodeId]?.nextId ?? graph.headId;
     }
@@ -4004,6 +4013,26 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
       lastX: event.clientX,
       lastY: event.clientY,
     };
+
+    if (hit?.kind === "graph-node" && !startedOnCenter) {
+      const nodeId = hit.nodeId;
+      pressContext.longPressTimer = window.setTimeout(() => {
+        if (!pressContext || pressContext.moved) return;
+        pressContext.longPressTimer = null;
+        pressContext.gestureHandled = true;
+        const s = store.getState();
+        const n = s.graph.nodes[nodeId];
+        if (n) {
+          const updatedGraph = { ...s.graph, headId: nodeId };
+          saveGraph(updatedGraph);
+          store.setState({ ...s, graph: updatedGraph, status: `Set ${n.chordName} as loop start` });
+          appendDebugLog(`[ui] set head id=${nodeId} chord="${n.chordName}"`);
+        }
+        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+        pressContext = null;
+      }, 550);
+    }
+
     canvas.setPointerCapture(event.pointerId);
   });
 
@@ -4038,6 +4067,11 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
     const dy = event.clientY - pressContext.startY;
     if (Math.hypot(dx, dy) > 10) {
       pressContext.moved = true;
+    }
+
+    if (pressContext.moved && pressContext.longPressTimer !== null) {
+      window.clearTimeout(pressContext.longPressTimer);
+      pressContext.longPressTimer = null;
     }
 
     if (pressContext.mode === "drag-node" && pressContext.targetNodeId !== null) {
@@ -4077,6 +4111,14 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
       return;
     }
 
+    if (pressContext.longPressTimer !== null) {
+      window.clearTimeout(pressContext.longPressTimer);
+      pressContext.longPressTimer = null;
+    }
+    if (pressContext.gestureHandled) {
+      pressContext = null;
+      return;
+    }
     const point = pointerToCanvas(canvas, event);
     if (pressContext.mode === "drag-node") {
       forcePinnedNodeId = null;
@@ -4140,22 +4182,14 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
           const match = findChordInCatalog(state.catalog, selectedNode.chordName);
           store.setState({
             ...state,
-            graph: {
-              ...state.graph,
-              selectedNodeId: hit.nodeId,
-            },
+            graph: { ...state.graph, selectedNodeId: hit.nodeId },
             selectedFamilyIndex: match?.familyIndex ?? state.selectedFamilyIndex,
             selectedChordIndex: match?.chordIndex ?? state.selectedChordIndex,
             chordFanVisible: true,
             status: `Selected state/node ${selectedNode.chordName}`,
           });
-          saveGraph({
-            ...state.graph,
-            selectedNodeId: hit.nodeId,
-          });
-          appendDebugLog(
-            `[ui] selected node id=${hit.nodeId} chord="${selectedNode.chordName}"`,
-          );
+          saveGraph({ ...state.graph, selectedNodeId: hit.nodeId });
+          appendDebugLog(`[ui] selected node id=${hit.nodeId} chord="${selectedNode.chordName}"`);
         }
       }
     }
@@ -4284,6 +4318,7 @@ window.addEventListener("beforeunload", () => {
   }
   if (forceRafId) {
     window.cancelAnimationFrame(forceRafId);
+    window.clearTimeout(forceRafId);
     forceRafId = 0;
   }
   resizeObserver?.disconnect();
