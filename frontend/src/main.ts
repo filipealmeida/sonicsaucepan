@@ -72,6 +72,7 @@ type SavedLoopRecord = {
     centralTone: string;
     bpm: number;
     timeSignature: TimeSignatureOption;
+    beatsPerChord: number;
     swing: number;
     waveform: WaveformOption;
     effects: EffectOption;
@@ -119,6 +120,7 @@ type AppSettings = {
   centralTone: string;
   bpm: number;
   timeSignature: TimeSignatureOption;
+  beatsPerChord: number;
   swing: number;
   waveform: WaveformOption;
   effects: EffectOption;
@@ -663,6 +665,7 @@ function currentLoopStateSignature(state: AppState): string {
       centralTone: state.settings.centralTone,
       bpm: state.settings.bpm,
       timeSignature: state.settings.timeSignature,
+      beatsPerChord: state.settings.beatsPerChord,
       swing: state.settings.swing,
       waveform: state.settings.waveform,
       effects: state.settings.effects,
@@ -697,6 +700,7 @@ function defaultSettings(): AppSettings {
     centralTone: "C",
     bpm: 96,
     timeSignature: "4/4",
+    beatsPerChord: 4,
     swing: 0,
     waveform: "triangle",
     effects: "none",
@@ -725,6 +729,16 @@ function normalizeBpm(value: unknown): number {
 
 function normalizeSwing(value: unknown): number {
   return clamp(Number(value) || 0, 0, 75);
+}
+
+const BEATS_PER_CHORD_OPTIONS = [0.125, 0.25, 0.5, 1, 2, 3, 4, 8] as const;
+
+function normalizeBeatsPerChord(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 4;
+  return [...BEATS_PER_CHORD_OPTIONS].reduce((best, opt) =>
+    Math.abs(opt - n) < Math.abs(best - n) ? opt : best
+  );
 }
 
 function normalizeCentralTone(value: unknown): string {
@@ -891,6 +905,7 @@ function loadSettings(): AppSettings {
       centralTone: normalizeCentralTone(parsed.centralTone),
       bpm: normalizeBpm(parsed.bpm),
       timeSignature: normalizeTimeSignature(parsed.timeSignature),
+      beatsPerChord: normalizeBeatsPerChord(parsed.beatsPerChord),
       swing: normalizeSwing(parsed.swing),
       waveform: normalizeWaveform(parsed.waveform),
       effects: normalizeEffects(parsed.effects),
@@ -915,6 +930,7 @@ function saveSettings(settings: AppSettings): void {
       centralTone: settings.centralTone,
       bpm: settings.bpm,
       timeSignature: settings.timeSignature,
+      beatsPerChord: settings.beatsPerChord,
       swing: settings.swing,
       waveform: settings.waveform,
       effects: settings.effects,
@@ -1110,7 +1126,7 @@ function getAudioContext(): AudioContext {
   return audioContextRef;
 }
 
-function sendMidiPreview(chord: ChordEntry): void {
+function sendMidiPreview(chord: ChordEntry, sustainMs = 920): void {
   const state = store.getState();
   const settings = state.settings;
   if (!settings.midiEnabled || !settings.midiPortId) {
@@ -1147,10 +1163,10 @@ function sendMidiPreview(chord: ChordEntry): void {
     midiNotes.forEach((note) => {
       selectedOutput?.send([noteOff, note, 0]);
     });
-  }, 920);
+  }, Math.max(100, sustainMs - 80));
 }
 
-function playChordPreview(chord: ChordEntry, pulseNodeId?: number): void {
+function playChordPreview(chord: ChordEntry, pulseNodeId?: number, sustainMs?: number): void {
   triggerCenterPulse(pulseNodeId);
 
   const state = store.getState();
@@ -1162,7 +1178,7 @@ function playChordPreview(chord: ChordEntry, pulseNodeId?: number): void {
   const tonesText = tones.length > 0 ? tones.join(" ") : "n/a";
   appendDebugLog(`[audio] ${familyName} | ${chord.full_name} | tones: ${tonesText} | wave=${waveform} fx=${effects}`);
 
-  sendMidiPreview(chord);
+  sendMidiPreview(chord, sustainMs);
 
   let context: AudioContext;
   try {
@@ -1177,6 +1193,10 @@ function playChordPreview(chord: ChordEntry, pulseNodeId?: number): void {
 
   const frequencies = chordToMidi(chord).map(midiToFrequency);
   const now = context.currentTime;
+  // sustain until just before the next chord; default to 1.1s for manual preview
+  const sustainSec = sustainMs !== undefined ? sustainMs / 1000 : 1.1;
+  const releaseSec = Math.min(0.12, sustainSec * 0.08);
+  const holdEnd = now + sustainSec - releaseSec;
   const master = context.createGain();
   const dryOutput = context.createGain();
   dryOutput.gain.setValueAtTime(1, now);
@@ -1199,23 +1219,26 @@ function playChordPreview(chord: ChordEntry, pulseNodeId?: number): void {
 
   master.gain.setValueAtTime(0, now);
   master.gain.linearRampToValueAtTime(0.18, now + 0.03);
-  master.gain.exponentialRampToValueAtTime(0.001, now + 1.1);
+  master.gain.setValueAtTime(0.18, holdEnd);
+  master.gain.exponentialRampToValueAtTime(0.001, now + sustainSec);
 
   const detuneSpread = effects === "chorus" ? 11 : 4;
 
   frequencies.forEach((frequency, index) => {
     const oscillator = context.createOscillator();
     const voiceGain = context.createGain();
+    const peak = 0.28 / Math.max(1, frequencies.length);
     oscillator.type = waveform;
     oscillator.frequency.setValueAtTime(frequency, now);
     oscillator.detune.setValueAtTime((index - 1) * detuneSpread, now);
     voiceGain.gain.setValueAtTime(0.0001, now);
-    voiceGain.gain.linearRampToValueAtTime(0.28 / Math.max(1, frequencies.length), now + 0.02 + index * 0.01);
-    voiceGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.95 + index * 0.02);
+    voiceGain.gain.linearRampToValueAtTime(peak, now + 0.02 + index * 0.01);
+    voiceGain.gain.setValueAtTime(peak, holdEnd);
+    voiceGain.gain.exponentialRampToValueAtTime(0.0001, now + sustainSec + index * 0.01);
     oscillator.connect(voiceGain);
     voiceGain.connect(master);
     oscillator.start(now + index * 0.01);
-    oscillator.stop(now + 1.15 + index * 0.02);
+    oscillator.stop(now + sustainSec + 0.05 + index * 0.01);
   });
 }
 
@@ -2101,6 +2124,10 @@ function buildPerformPanel(state: AppState): string {
   const timeSignatureOptions = TIME_SIGNATURES
     .map((signature) => `<option value="${signature}" ${signature === settings.timeSignature ? "selected" : ""}>${escapeHtml(signature)}</option>`)
     .join("");
+  const bpcLabel = (v: number) => v < 1 ? `${v === 0.125 ? "1/8" : v === 0.25 ? "1/4" : "1/2"} beat` : `${v} beat${v === 1 ? "" : "s"}`;
+  const beatsPerChordOptions = BEATS_PER_CHORD_OPTIONS
+    .map((v) => `<option value="${v}" ${v === settings.beatsPerChord ? "selected" : ""}>${escapeHtml(bpcLabel(v))}</option>`)
+    .join("");
   const effectsOptions = EFFECT_OPTIONS
     .map((effect) => `<option value="${effect}" ${effect === settings.effects ? "selected" : ""}>${escapeHtml(effect[0].toUpperCase() + effect.slice(1))}</option>`)
     .join("");
@@ -2119,12 +2146,16 @@ function buildPerformPanel(state: AppState): string {
             <select data-perform-setting="central-tone">${toneOptions}</select>
           </label>
           <label class="settings-field">
-            <span>BPM</span>
-            <input type="number" min="40" max="240" step="1" value="${settings.bpm}" data-perform-setting="bpm" />
+            <span>BPM (${settings.bpm})</span>
+            <input type="range" min="60" max="240" step="1" value="${settings.bpm}" data-perform-setting="bpm" />
           </label>
           <label class="settings-field">
             <span>Time Signature</span>
             <select data-perform-setting="time-signature">${timeSignatureOptions}</select>
+          </label>
+          <label class="settings-field">
+            <span>Beats Per Chord</span>
+            <select data-perform-setting="beats-per-chord">${beatsPerChordOptions}</select>
           </label>
           <label class="settings-field">
             <span>Swing (${settings.swing}%)</span>
@@ -2415,15 +2446,19 @@ function stopPerformLoop(): void {
 }
 
 function currentPerformStepMs(stepCount: number): number {
-  const { bpm, swing } = store.getState().settings;
+  const { bpm, swing, beatsPerChord } = store.getState().settings;
+  const bpc = normalizeBeatsPerChord(beatsPerChord);
+  // For sub-beat values the timer fires every bpc beats; for whole beats it fires every 1 beat.
+  const stepBeats = bpc < 1 ? bpc : 1;
   const beatMs = 60000 / clamp(bpm, 40, 240);
-  if (swing <= 0) {
-    return beatMs;
+  const stepMs = beatMs * stepBeats;
+  if (swing <= 0 || stepBeats < 1) {
+    return stepMs;
   }
   const swingRatio = clamp(swing / 100, 0, 0.75);
   const isOddStep = stepCount % 2 === 1;
   const multiplier = isOddStep ? 1 - swingRatio * 0.5 : 1 + swingRatio * 0.5;
-  return beatMs * multiplier;
+  return stepMs * multiplier;
 }
 
 function scheduleNextPerformStep(): void {
@@ -2481,7 +2516,7 @@ function triggerCenterPulse(nodeId?: number): void {
   schedulePulseRedraw();
 }
 
-function syncSelectionToNode(nodeId: number, status: string, options?: { updateSelection?: boolean }): void {
+function syncSelectionToNode(nodeId: number, status: string, options?: { updateSelection?: boolean; sustainMs?: number }): void {
   const state = store.getState();
   const node = state.graph.nodes[nodeId];
   if (!node) {
@@ -2503,7 +2538,7 @@ function syncSelectionToNode(nodeId: number, status: string, options?: { updateS
     if (chord) {
       const skipSound = !state.settings.alwaysPlayChords && performPlaying && updateSelection;
       if (!skipSound) {
-        playChordPreview(chord, nodeId);
+        playChordPreview(chord, nodeId, options?.sustainMs);
       }
     }
   }
@@ -2530,19 +2565,29 @@ function syncSelectionToNode(nodeId: number, status: string, options?: { updateS
 function performStep(): void {
   const state = store.getState();
   const graph = state.graph;
-
-  if (performCursorNodeId === null || !graph.nodes[performCursorNodeId]) {
-    performCursorNodeId = graph.selectedNodeId;
-  } else {
-    performCursorNodeId = graph.nodes[performCursorNodeId]?.nextId ?? graph.headId;
+  const beatsPerChord = normalizeBeatsPerChord(state.settings.beatsPerChord);
+  // Sub-beat: every step is a chord boundary. Whole-beat: boundary every beatsPerChord steps.
+  const stepsPerChord = beatsPerChord < 1 ? 1 : beatsPerChord;
+  const isChordBoundary = performStepCount % stepsPerChord === 0;
+  if (isChordBoundary) {
+    if (performCursorNodeId === null || !graph.nodes[performCursorNodeId]) {
+      performCursorNodeId = graph.selectedNodeId;
+    } else {
+      performCursorNodeId = graph.nodes[performCursorNodeId]?.nextId ?? graph.headId;
+    }
   }
 
   if (performCursorNodeId === null) {
     return;
   }
 
-  const chordName = graph.nodes[performCursorNodeId]?.chordName ?? "state";
-  syncSelectionToNode(performCursorNodeId, `Performing ${chordName}`, { updateSelection: false });
+  if (isChordBoundary) {
+    const chordName = graph.nodes[performCursorNodeId]?.chordName ?? "state";
+    const { bpm, beatsPerChord } = state.settings;
+    const beatMs = 60000 / clamp(bpm, 40, 240);
+    const sustainMs = normalizeBeatsPerChord(beatsPerChord) * beatMs * 0.92;
+    syncSelectionToNode(performCursorNodeId, `Performing ${chordName}`, { updateSelection: false, sustainMs });
+  }
 }
 
 function startPerformLoop(options?: { resetCursor?: boolean }): void {
@@ -3323,6 +3368,7 @@ function buildSavedLoopRecord(state: AppState, id: string, name: string): SavedL
       centralTone: state.settings.centralTone,
       bpm: state.settings.bpm,
       timeSignature: state.settings.timeSignature,
+      beatsPerChord: state.settings.beatsPerChord,
       swing: state.settings.swing,
       waveform: state.settings.waveform,
       effects: state.settings.effects,
@@ -3671,9 +3717,15 @@ function bindPerformPanel(shell: HTMLElement): void {
   });
 
   const bpmInput = shell.querySelector<HTMLInputElement>("input[data-perform-setting='bpm']");
-  bpmInput?.addEventListener("change", () => {
+  bpmInput?.addEventListener("input", () => {
     const bpm = normalizeBpm(bpmInput.value);
     updateSettings({ bpm }, `Tempo set to ${bpm} BPM`);
+  });
+
+  const beatsPerChordSelect = shell.querySelector<HTMLSelectElement>("select[data-perform-setting='beats-per-chord']");
+  beatsPerChordSelect?.addEventListener("change", () => {
+    const beatsPerChord = normalizeBeatsPerChord(beatsPerChordSelect.value);
+    updateSettings({ beatsPerChord }, `Beats per chord set to ${beatsPerChord}`);
   });
 
   const toneSelect = shell.querySelector<HTMLSelectElement>("select[data-perform-setting='central-tone']");
