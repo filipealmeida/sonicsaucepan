@@ -3803,7 +3803,25 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
     redrawCanvasOnly(canvas);
   }, { passive: false });
 
+  const activePointers = new Map<number, { x: number; y: number }>();
+  let prevPinchDist = 0;
+
   canvas.addEventListener("pointerdown", (event) => {
+    activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (activePointers.size === 2) {
+      // Second finger landed — start pinch, cancel any ongoing single-pointer gesture.
+      const pts = [...activePointers.values()];
+      prevPinchDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      if (pressContext) {
+        if (canvas.hasPointerCapture(pressContext.pointerId)) {
+          canvas.releasePointerCapture(pressContext.pointerId);
+        }
+        pressContext = null;
+      }
+      canvas.setPointerCapture(event.pointerId);
+      return;
+    }
     const point = pointerToCanvas(canvas, event);
     const hit = hitTest(hitZones, point);
     const startedOnCenter = hit?.kind === "center";
@@ -3830,6 +3848,29 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
   });
 
   canvas.addEventListener("pointermove", (event) => {
+    activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (activePointers.size >= 2) {
+      const pts = [...activePointers.values()];
+      const newDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      if (prevPinchDist > 0 && newDist > 0) {
+        const factor = newDist / prevPinchDist;
+        const newZoom = clamp(sceneZoom * factor, 0.30, 1.85);
+        const rect = canvas.getBoundingClientRect();
+        const midX = (pts[0].x + pts[1].x) * 0.5 - rect.left;
+        const midY = (pts[0].y + pts[1].y) * 0.5 - rect.top;
+        const centerX = rect.width * 0.5 + scenePan.x;
+        const centerY = rect.height * 0.665 + scenePan.y;
+        const ratio = newZoom / sceneZoom;
+        scenePan.x += (midX - centerX) * (1 - ratio);
+        scenePan.y += (midY - centerY) * (1 - ratio);
+        sceneZoom = newZoom;
+        redrawCanvasOnly(canvas);
+      }
+      prevPinchDist = newDist;
+      return;
+    }
+
     if (!pressContext || pressContext.pointerId !== event.pointerId) {
       return;
     }
@@ -3865,6 +3906,13 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
   });
 
   canvas.addEventListener("pointerup", (event) => {
+    activePointers.delete(event.pointerId);
+    if (activePointers.size < 2) {
+      prevPinchDist = 0;
+    }
+    if (activePointers.size >= 1) {
+      return;
+    }
     if (!pressContext || pressContext.pointerId !== event.pointerId) {
       return;
     }
