@@ -488,29 +488,6 @@
           "root": "G"
         }
       ]
-    },
-    {
-      "name": "User Defined",
-      "chords": [
-        {
-          "full_name": "C",
-          "tones": [
-            "C",
-            "E",
-            "G"
-          ]
-        },
-        {
-          "full_name": "Ci1",
-          "tones": [
-            "E",
-            "G",
-            "C",
-            "E",
-            "E"
-          ]
-        }
-      ]
     }
   ]
 }
