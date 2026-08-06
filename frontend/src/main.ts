@@ -1,5 +1,5 @@
 import { createStore } from "zustand/vanilla";
-import catalogJson from "../../assets/chords/creative_chord_choices.json";
+import catalogJson from "../../assets/chords/chord_strategy_A1.json";
 import "./styles.css";
 
 type ChordEntry = {
