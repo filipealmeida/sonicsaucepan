@@ -21,6 +21,8 @@ type ChordCatalog = {
 
 type GraphNodeType = "chord-selection";
 
+type CustomChordInputKind = "tones" | "midi";
+
 type GraphNodeAction = "add-after" | "remove-selected" | "cycle-selection";
 
 type GraphNodeRenderStyle = {
@@ -49,6 +51,13 @@ type GraphNode = {
   type: GraphNodeType;
   chordName: string;
   beatsPerChordOverride?: number | null;
+  waveformOverride?: WaveformOption | null;
+  effectsOverride?: EffectOption | null;
+  bassPresetOverride?: BassPresetOption | null;
+  customChordEnabled?: boolean;
+  customChordInputKind?: CustomChordInputKind;
+  customChordRawInput?: string;
+  customChordTransposeWithCentralTone?: boolean;
   nextId: number;
 };
 
@@ -368,7 +377,20 @@ function createInitialGraph(initialChord: string): LoopGraph {
     selectedNodeId: 0,
     nextNodeId: 1,
     nodes: {
-      0: { id: 0, type: "chord-selection", chordName: initialChord, beatsPerChordOverride: null, nextId: 0 },
+      0: {
+        id: 0,
+        type: "chord-selection",
+        chordName: initialChord,
+        beatsPerChordOverride: null,
+        waveformOverride: null,
+        effectsOverride: null,
+        bassPresetOverride: null,
+        customChordEnabled: false,
+        customChordInputKind: "tones",
+        customChordRawInput: "",
+        customChordTransposeWithCentralTone: false,
+        nextId: 0,
+      },
     },
   };
 }
@@ -456,6 +478,13 @@ function addAfterSelected(graph: LoopGraph, chordName: string): LoopGraph {
         type: selected.type,
         chordName,
         beatsPerChordOverride: selected.beatsPerChordOverride ?? null,
+        waveformOverride: selected.waveformOverride ?? null,
+        effectsOverride: selected.effectsOverride ?? null,
+        bassPresetOverride: selected.bassPresetOverride ?? null,
+        customChordEnabled: selected.customChordEnabled === true,
+        customChordInputKind: selected.customChordInputKind === "midi" ? "midi" : "tones",
+        customChordRawInput: selected.customChordRawInput ?? "",
+        customChordTransposeWithCentralTone: selected.customChordTransposeWithCentralTone === true,
         nextId: selected.nextId,
       },
     },
@@ -646,6 +675,13 @@ function loadSavedGraph(): LoopGraph | null {
       normalizedNodes[nodeId] = {
         ...node,
         beatsPerChordOverride: normalizeNodeBeatsOverride(node.beatsPerChordOverride),
+        waveformOverride: node.waveformOverride == null ? null : normalizeWaveform(node.waveformOverride),
+        effectsOverride: node.effectsOverride == null ? null : normalizeEffects(node.effectsOverride),
+        bassPresetOverride: node.bassPresetOverride == null ? null : normalizeBassPreset(node.bassPresetOverride),
+        customChordEnabled: node.customChordEnabled === true,
+        customChordInputKind: node.customChordInputKind === "midi" ? "midi" : "tones",
+        customChordRawInput: typeof node.customChordRawInput === "string" ? node.customChordRawInput : "",
+        customChordTransposeWithCentralTone: node.customChordTransposeWithCentralTone === true,
       };
     }
     return {
@@ -927,6 +963,129 @@ function normalizeNodeBeatsOverride(value: unknown): number | null {
   return normalizeBeatsPerChord(value);
 }
 
+function nodeUsesCustomChord(node: GraphNode): boolean {
+  return node.customChordEnabled === true && (node.customChordRawInput ?? "").trim().length > 0;
+}
+
+type ParsedNodeCustomChord = {
+  kind: CustomChordInputKind;
+  midiNotes: number[];
+  tonesText: string;
+};
+
+type NodeCustomPlaybackData = {
+  midiNotes: number[];
+  tonesText: string;
+  label: string;
+};
+
+function centralToneTransposeDelta(centralTone: string): number {
+  const targetSemitone = noteToSemitone(normalizeCentralTone(centralTone));
+  if (targetSemitone === null) {
+    return 0;
+  }
+  return ((targetSemitone - noteToSemitone("C")!) % 12 + 12) % 12;
+}
+
+function parseCustomToneToken(token: string): string | null {
+  const match = token.trim().match(/^([A-Ga-g])([#b]?)$/);
+  if (!match) {
+    return null;
+  }
+  const [, letter, accidental] = match;
+  return `${letter.toUpperCase()}${accidental}`;
+}
+
+function parseNodeCustomChord(node: GraphNode, centralTone: string): ParsedNodeCustomChord | null {
+  if (!nodeUsesCustomChord(node)) {
+    return null;
+  }
+
+  const raw = (node.customChordRawInput ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const parts = raw.split(/[\s,;|]+/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) {
+    return null;
+  }
+
+  const allNumeric = parts.every((part) => /^-?\d+$/.test(part));
+  const kind: CustomChordInputKind = allNumeric ? "midi" : "tones";
+  const transposeDelta = node.customChordTransposeWithCentralTone === true
+    ? centralToneTransposeDelta(centralTone)
+    : 0;
+
+  if (kind === "midi") {
+    const midiNotes: number[] = [];
+    for (const part of parts) {
+      const n = Number(part);
+      if (!Number.isInteger(n) || n < 0 || n > 127) {
+        return null;
+      }
+      const transposed = clamp(n + transposeDelta, 0, 127);
+      midiNotes.push(transposed);
+    }
+    if (midiNotes.length === 0) {
+      return null;
+    }
+    return {
+      kind,
+      midiNotes,
+      tonesText: midiNotes.join(" "),
+    };
+  }
+
+  const preferFlats = normalizeCentralTone(centralTone).includes("b");
+  const tones: string[] = [];
+  for (const part of parts) {
+    const token = parseCustomToneToken(part);
+    if (!token) {
+      return null;
+    }
+    const transposed = transposeDelta !== 0 ? transposeNoteName(token, transposeDelta, preferFlats) : token;
+    tones.push(transposed);
+  }
+  const midiNotes = tonesToMidi(tones);
+  if (midiNotes.length === 0) {
+    return null;
+  }
+  return {
+    kind,
+    midiNotes,
+    tonesText: tones.join(" "),
+  };
+}
+
+function defaultCustomChordInputFromNode(state: AppState, node: GraphNode): string {
+  const match = findChordInCatalog(state.catalog, node.chordName);
+  if (!match) {
+    return node.chordName;
+  }
+  const chord = state.catalog.families[match.familyIndex]?.chords[match.chordIndex];
+  if (!chord) {
+    return node.chordName;
+  }
+  const tones = chordTonesFromIntervals(chord, state.settings.centralTone);
+  if (tones.length > 0) {
+    return tones.join(" ");
+  }
+  return chord.full_name;
+}
+
+function resolveNodeCustomPlaybackData(state: AppState, node: GraphNode): NodeCustomPlaybackData | null {
+  const parsed = parseNodeCustomChord(node, state.settings.centralTone);
+  if (!parsed) {
+    return null;
+  }
+  return {
+    midiNotes: parsed.midiNotes,
+    tonesText: parsed.tonesText,
+    label: `Custom ${parsed.kind === "midi" ? "MIDI" : "tones"}`,
+  };
+}
+
 function effectiveBeatsPerChordForNode(state: AppState, nodeId: number | null): number {
   if (nodeId === null) {
     return normalizeBeatsPerChord(state.settings.beatsPerChord);
@@ -936,6 +1095,18 @@ function effectiveBeatsPerChordForNode(state: AppState, nodeId: number | null): 
     return normalizeBeatsPerChord(state.settings.beatsPerChord);
   }
   return normalizeBeatsPerChord(node.beatsPerChordOverride ?? state.settings.beatsPerChord);
+}
+
+function effectiveWaveformForNode(state: AppState, node: GraphNode): WaveformOption {
+  return node.waveformOverride ?? state.settings.waveform;
+}
+
+function effectiveEffectsForNode(state: AppState, node: GraphNode): EffectOption {
+  return node.effectsOverride ?? state.settings.effects;
+}
+
+function effectiveBassPresetForNode(state: AppState, node: GraphNode): BassPresetOption {
+  return node.bassPresetOverride ?? state.settings.bassPreset;
 }
 
 function normalizeCentralTone(value: unknown): string {
@@ -1325,7 +1496,13 @@ function toBassRegister(midi: number): number {
 function computeBassNotes(chord: ChordEntry, preset: BassPresetOption, beatWithinChord: number, stepsPerChord: number): number[] {
   if (preset === "off") return [];
   const chordMidi = chordToMidi(chord);
-  const root = toBassRegister(chordMidi[0]);
+  if (chordMidi.length === 0) return [];
+  return computeBassNotesFromRootMidi(chordMidi[0], preset, beatWithinChord, stepsPerChord);
+}
+
+function computeBassNotesFromRootMidi(rootMidiInput: number, preset: BassPresetOption, beatWithinChord: number, stepsPerChord: number): number[] {
+  if (preset === "off") return [];
+  const root = toBassRegister(rootMidiInput);
   const fifth = root + 7;
   const midBeat = Math.max(1, Math.floor(stepsPerChord / 2));
   switch (preset) {
@@ -1440,7 +1617,7 @@ function resolveMidiOutput(portId: string): MidiOutputLike | null {
   return null;
 }
 
-function sendMidiPreview(chord: ChordEntry, sustainMs = 920): void {
+function sendMidiPreview(chord: ChordEntry, sustainMs = 920, midiNotesOverride?: number[], labelOverride?: string): void {
   const state = store.getState();
   const settings = state.settings;
   if (!settings.midiEnabled || !settings.midiPortId) {
@@ -1458,12 +1635,16 @@ function sendMidiPreview(chord: ChordEntry, sustainMs = 920): void {
     return;
   }
 
-  const midiNotes = chordToMidi(chord).map((note) => clamp(note, 0, 127));
+  const midiNotes = (midiNotesOverride ?? chordToMidi(chord)).map((note) => clamp(note, 0, 127));
+  if (midiNotes.length === 0) {
+    return;
+  }
   const channel = clamp(settings.midiChannel, 1, 16) - 1;
   const noteOn = 0x90 + channel;
   const noteOff = 0x80 + channel;
+  const chordLabel = labelOverride ?? chord.full_name;
 
-  appendDebugLog(`[midi] ch${channel + 1} ${chord.full_name} notes=[${midiNotes.join(',')}] port=${selectedOutput.name ?? settings.midiPortId}`);
+  appendDebugLog(`[midi] ch${channel + 1} ${chordLabel} notes=[${midiNotes.join(',')}] port=${selectedOutput.name ?? settings.midiPortId}`);
 
   midiNotes.forEach((note) => {
     selectedOutput.send([noteOn, note, 96]);
@@ -1485,20 +1666,27 @@ function playChordPreview(
     humanize?: boolean;
     humanizeAmount?: number;
     layerWidth?: number;
+    midiNotesOverride?: number[];
+    tonesTextOverride?: string;
+    labelOverride?: string;
+    familyNameOverride?: string;
+    waveformOverride?: WaveformOption;
+    effectsOverride?: EffectOption;
   },
 ): void {
   triggerCenterPulse(options?.pulseNodeId);
 
   const state = store.getState();
-  const waveform = state.settings.waveform;
-  const effects = state.settings.effects;
+  const waveform = options?.waveformOverride ?? state.settings.waveform;
+  const effects = options?.effectsOverride ?? state.settings.effects;
+  const chordLabel = options?.labelOverride ?? chord.full_name;
   const match = findChordInCatalog(state.catalog, chord.full_name);
-  const familyName = match ? state.catalog.families[match.familyIndex]?.name ?? "Unknown family" : "Unknown family";
+  const familyName = options?.familyNameOverride ?? (match ? state.catalog.families[match.familyIndex]?.name ?? "Unknown family" : "Unknown family");
   const tones = chordTonesFromIntervals(chord, state.settings.centralTone);
-  const tonesText = tones.length > 0 ? tones.join(" ") : "n/a";
-  appendDebugLog(`[audio] ${familyName} | ${chord.full_name} | tones: ${tonesText} | wave=${waveform} fx=${effects}`);
+  const tonesText = options?.tonesTextOverride ?? (tones.length > 0 ? tones.join(" ") : "n/a");
+  appendDebugLog(`[audio] ${familyName} | ${chordLabel} | tones: ${tonesText} | wave=${waveform} fx=${effects}`);
 
-  sendMidiPreview(chord, options?.sustainMs);
+  sendMidiPreview(chord, options?.sustainMs, options?.midiNotesOverride, chordLabel);
 
   let context: AudioContext;
   try {
@@ -1511,7 +1699,11 @@ function playChordPreview(
     void context.resume();
   }
 
-  const frequencies = chordToMidi(chord).map(midiToFrequency);
+  const midiNotes = options?.midiNotesOverride ?? chordToMidi(chord);
+  if (midiNotes.length === 0) {
+    return;
+  }
+  const frequencies = midiNotes.map(midiToFrequency);
   const now = context.currentTime;
   // sustain until just before the next chord; default to 1.1s for manual preview
   const sustainSec = options?.sustainMs !== undefined ? options.sustainMs / 1000 : 1.1;
@@ -2311,6 +2503,16 @@ class WebGlStage {
 }
 
 function overlay(rootEl: HTMLElement, state: AppState, layout: StageLayout, geometry: SceneGeometry): void {
+  const activeNodeTimingInput = document.activeElement instanceof HTMLInputElement && document.activeElement.matches("input[data-node-timing-input='custom-chord']")
+    ? document.activeElement
+    : null;
+  if (activeNodeTimingInput) {
+    restoreNodeTimingChordInputFocus = true;
+    nodeTimingChordInputCursor = activeNodeTimingInput.selectionStart ?? activeNodeTimingInput.value.length;
+    nodeTimingChordInputSelectionEnd = activeNodeTimingInput.selectionEnd ?? nodeTimingChordInputCursor;
+    nodeTimingChordInputSelectionDirection = activeNodeTimingInput.selectionDirection ?? "none";
+  }
+
   const activeDebugInput = document.activeElement instanceof HTMLInputElement && document.activeElement.matches("input[data-debug-input]")
     ? document.activeElement
     : null;
@@ -2540,14 +2742,51 @@ function buildNodeTimingPanel(state: AppState): string {
     : bpcLabel(normalizeBeatsPerChord(state.settings.beatsPerChord));
   const headNode = state.graph.nodes[state.graph.headId] ?? null;
   const isActiveNodeHead = activeNode?.id === state.graph.headId;
+  const customEnabled = activeNode?.customChordEnabled === true;
+  const customRaw = activeNode?.customChordRawInput ?? "";
+  const customInputValue = activeNode ? nodeTimingDraftInputValue(state, activeNode) : customRaw;
+  const customTranspose = activeNode?.customChordTransposeWithCentralTone === true;
+  const parsedCustom = activeNode
+    ? parseNodeCustomChord(
+      {
+        ...activeNode,
+        customChordRawInput: customInputValue,
+      },
+      state.settings.centralTone,
+    )
+    : null;
+  const customSourcePreview = customEnabled
+    ? (parsedCustom?.tonesText ?? "invalid")
+    : "catalog chord";
+  const waveformOptions = WAVEFORMS
+    .map((value) => {
+      const selected = activeNode?.waveformOverride === value;
+      return `<option value="${value}" ${selected ? "selected" : ""}>${escapeHtml(value[0].toUpperCase() + value.slice(1))}</option>`;
+    })
+    .join("");
+  const effectsOptions = EFFECT_OPTIONS
+    .map((value) => {
+      const selected = activeNode?.effectsOverride === value;
+      return `<option value="${value}" ${selected ? "selected" : ""}>${escapeHtml(value[0].toUpperCase() + value.slice(1))}</option>`;
+    })
+    .join("");
+  const bassOptions = BASS_PRESET_OPTIONS
+    .map((value) => {
+      const selected = activeNode?.bassPresetOverride === value;
+      return `<option value="${value}" ${selected ? "selected" : ""}>${escapeHtml(BASS_PRESET_LABELS[value])}</option>`;
+    })
+    .join("");
+  const effectiveWaveform = activeNode ? effectiveWaveformForNode(state, activeNode) : state.settings.waveform;
+  const effectiveEffects = activeNode ? effectiveEffectsForNode(state, activeNode) : state.settings.effects;
+  const effectiveBass = activeNode ? effectiveBassPresetForNode(state, activeNode) : state.settings.bassPreset;
 
   return `
     <div class="settings-modal node-timing-modal ${settings.showNodeTimingPanel ? "open" : ""}" aria-hidden="${settings.showNodeTimingPanel ? "false" : "true"}">
-      <button class="settings-backdrop" data-node-timing-action="close" aria-label="Close node timing options"></button>
-      <section class="settings-panel" role="dialog" aria-modal="true" tabindex="-1" aria-label="Node timing options">
+      <button class="settings-backdrop" data-node-timing-action="close" aria-label="Close node ingredients"></button>
+      <section class="settings-panel" role="dialog" aria-modal="true" tabindex="-1" aria-label="Node ingredients">
         <header class="settings-header">
-          <h2>Node Timing</h2>
-          <button class="settings-close" data-node-timing-action="close" aria-label="Close node timing options">×</button>
+          <h2>Node Ingredients</h2>
+          <button class="settings-close" data-node-timing-action="close" aria-label="Close node ingredients">×</button>
         </header>
         <div class="settings-fields">
           <label class="settings-field">
@@ -2570,6 +2809,51 @@ function buildNodeTimingPanel(state: AppState): string {
             <strong>${escapeHtml(headNode?.chordName ?? "node")}</strong>
           </div>
           <button class="saved-loop-save-btn node-timing-head-btn" data-node-timing-action="make-head" type="button" ${isActiveNodeHead ? "disabled" : ""}>${isActiveNodeHead ? "Already Initial State" : "Make This Node Initial State"}</button>
+          <label class="settings-field">
+            <span>Chord Source</span>
+            <select data-node-timing-setting="chord-source">
+              <option value="catalog" ${customEnabled ? "" : "selected"}>Catalog chord (${escapeHtml(activeNode?.chordName ?? "")})</option>
+              <option value="custom" ${customEnabled ? "selected" : ""}>Custom chord</option>
+            </select>
+          </label>
+          <label class="settings-field inline">
+            <span>Transpose With Central Tone</span>
+            <input type="checkbox" data-node-timing-setting="custom-transpose" ${customTranspose ? "checked" : ""} ${customEnabled ? "" : "disabled"} />
+          </label>
+          <label class="settings-field">
+            <span>Custom Notes</span>
+            <input type="text" value="${escapeAttr(customInputValue)}" data-node-timing-input="custom-chord" placeholder="C E G Bb or 60 64 67" ${customEnabled ? "" : "disabled"} />
+          </label>
+          <div class="settings-field inline node-timing-info">
+            <span>Custom Preview</span>
+            <strong data-node-timing-custom-preview>${escapeHtml(customSourcePreview)}</strong>
+          </div>
+          <button class="saved-loop-save-btn" data-node-timing-action="test-chord" type="button">Test Chord</button>
+          <label class="settings-field">
+            <span>Waveform</span>
+            <select data-node-timing-setting="waveform-override">
+              <option value="inherit" ${activeNode?.waveformOverride == null ? "selected" : ""}>Inherit Global (${escapeHtml(state.settings.waveform)})</option>
+              ${waveformOptions}
+            </select>
+          </label>
+          <label class="settings-field">
+            <span>Effects</span>
+            <select data-node-timing-setting="effects-override">
+              <option value="inherit" ${activeNode?.effectsOverride == null ? "selected" : ""}>Inherit Global (${escapeHtml(state.settings.effects)})</option>
+              ${effectsOptions}
+            </select>
+          </label>
+          <label class="settings-field">
+            <span>Bass</span>
+            <select data-node-timing-setting="bass-override">
+              <option value="inherit" ${activeNode?.bassPresetOverride == null ? "selected" : ""}>Inherit Global (${escapeHtml(BASS_PRESET_LABELS[state.settings.bassPreset])})</option>
+              ${bassOptions}
+            </select>
+          </label>
+          <div class="settings-field inline node-timing-info">
+            <span>Effective Sound</span>
+            <strong data-node-timing-effective-sound>${escapeHtml(`${effectiveWaveform} · ${effectiveEffects} · ${BASS_PRESET_LABELS[effectiveBass]}`)}</strong>
+          </div>
         </div>
       </section>
     </div>
@@ -2681,7 +2965,7 @@ function buildOverlayContent(state: AppState, layout: StageLayout, geometry: Sce
   const removeSymbol = actionSymbols?.remove ?? "-";
 
   return `
-    <span class="label center" style="left:${activeCenterX}px;top:${activeCenterY}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(chordLabel(selectedNode?.chordName ?? selectedChord.full_name))}</span>
+    <span class="label center" style="left:${activeCenterX}px;top:${activeCenterY}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(chordLabel(selectedNode ? effectiveNodeChordLabel(state, selectedNode) : selectedChord.full_name))}</span>
     <span class="label major" style="left:${activeCenterX}px;top:${activeCenterY - layout.centerRadius + 24}px;transform:translate(-50%,-50%) scale(${sceneZoom.toFixed(3)})">${escapeHtml(majorLabel)}</span>
     ${chordLabels}
     ${familyLabels}
@@ -2698,6 +2982,7 @@ type GraphNodeView = {
   radius: number;
   isSelected: boolean;
   chordName: string;
+  displayChordLabel: string;
 };
 
 type GestureContext = {
@@ -2726,6 +3011,11 @@ let modalOpenCount = 0;
 let resumePerformAfterModalClose = false;
 let debugFooterDraft = "";
 let restoreDebugInputFocus = false;
+let restoreNodeTimingChordInputFocus = false;
+let nodeTimingChordInputCursor = 0;
+let nodeTimingChordInputSelectionEnd = 0;
+let nodeTimingChordInputSelectionDirection: "forward" | "backward" | "none" = "none";
+const nodeTimingCustomChordDrafts: Record<number, string> = {};
 const nodeOffsets: Record<number, { x: number; y: number }> = { ...initialNodeOffsets };
 const nodeVelocities: Record<number, { vx: number; vy: number }> = {};
 let forcePinnedNodeId: number | null = null;
@@ -2957,7 +3247,10 @@ function syncSelectionToNode(
 
   const updateSelection = options?.updateSelection ?? true;
 
-  const match = findChordInCatalog(state.catalog, node.chordName);
+  const nodeWaveform = effectiveWaveformForNode(state, node);
+  const nodeEffects = effectiveEffectsForNode(state, node);
+  const customPlayback = resolveNodeCustomPlaybackData(state, node);
+  const match = customPlayback ? null : findChordInCatalog(state.catalog, node.chordName);
   const updatedGraph = updateSelection
     ? {
       ...state.graph,
@@ -2965,7 +3258,25 @@ function syncSelectionToNode(
     }
     : state.graph;
 
-  if (match) {
+  if (customPlayback) {
+    const skipSound = !state.settings.alwaysPlayChords && performPlaying && updateSelection;
+    if (!skipSound) {
+      playChordPreview({ full_name: node.chordName || customPlayback.label }, {
+        pulseNodeId: nodeId,
+        sustainMs: options?.sustainMs,
+        velocity: options?.velocity,
+        humanize: options?.humanize,
+        humanizeAmount: options?.humanizeAmount,
+        layerWidth: options?.layerWidth,
+        midiNotesOverride: customPlayback.midiNotes,
+        tonesTextOverride: customPlayback.tonesText,
+        labelOverride: customPlayback.label,
+        familyNameOverride: "Custom",
+        waveformOverride: nodeWaveform,
+        effectsOverride: nodeEffects,
+      });
+    }
+  } else if (match) {
     const chord = state.catalog.families[match.familyIndex]?.chords[match.chordIndex];
     if (chord) {
       const skipSound = !state.settings.alwaysPlayChords && performPlaying && updateSelection;
@@ -2977,6 +3288,8 @@ function syncSelectionToNode(
           humanize: options?.humanize,
           humanizeAmount: options?.humanizeAmount,
           layerWidth: options?.layerWidth,
+          waveformOverride: nodeWaveform,
+          effectsOverride: nodeEffects,
         });
       }
     }
@@ -3022,7 +3335,7 @@ function performStep(): void {
 
   if (isChordBoundary) {
     const chordName = graph.nodes[performCursorNodeId]?.chordName ?? "state";
-    const { bpm, bassPreset, accentStrength, humanizeAmount, layerWidth } = state.settings;
+    const { bpm, accentStrength, humanizeAmount, layerWidth } = state.settings;
     const beatMs = 60000 / clamp(bpm, 40, 240);
     const sustainMs = nodeBeatsPerChord * beatMs * 0.92;
     const chordAccent = computeAccent(0, stepsPerChord, accentStrength);
@@ -3036,8 +3349,10 @@ function performStep(): void {
       layerWidth,
     });
     const node = graph.nodes[performCursorNodeId];
+    const bassPreset = node ? effectiveBassPresetForNode(state, node) : state.settings.bassPreset;
     const catalog = state.catalog;
-    const match = node ? findChordInCatalog(catalog, node.chordName) : null;
+    const customPlayback = node ? resolveNodeCustomPlaybackData(state, node) : null;
+    const match = node && !customPlayback ? findChordInCatalog(catalog, node.chordName) : null;
     const chordEntry = match ? catalog.families[match.familyIndex]?.chords[match.chordIndex] : null;
     if (chordEntry) {
       const bassNotes = computeBassNotes(chordEntry, bassPreset, 0, stepsPerChord);
@@ -3047,17 +3362,37 @@ function performStep(): void {
         humanize: true,
         humanizeAmount: humanizeDepth,
       });
+    } else if (customPlayback && customPlayback.midiNotes.length > 0) {
+      const bassNotes = computeBassNotesFromRootMidi(customPlayback.midiNotes[0], bassPreset, 0, stepsPerChord);
+      playBassNotes(bassNotes, beatMs, {
+        velocity: chordAccent,
+        accent: chordAccent,
+        humanize: true,
+        humanizeAmount: humanizeDepth,
+      });
     }
   } else {
     // On non-boundary beats, handle beat-aware bass patterns (oom-pah, stride).
-    const { bpm, bassPreset, accentStrength, humanizeAmount } = state.settings;
+    const { bpm, accentStrength, humanizeAmount } = state.settings;
     const beatMs = 60000 / clamp(bpm, 40, 240);
     const beatWithinChord = performBeatWithinChord;
     const node = performCursorNodeId !== null ? graph.nodes[performCursorNodeId] : null;
-    const match = node ? findChordInCatalog(state.catalog, node.chordName) : null;
+    const bassPreset = node ? effectiveBassPresetForNode(state, node) : state.settings.bassPreset;
+    const customPlayback = node ? resolveNodeCustomPlaybackData(state, node) : null;
+    const match = node && !customPlayback ? findChordInCatalog(state.catalog, node.chordName) : null;
     const chordEntry = match ? state.catalog.families[match.familyIndex]?.chords[match.chordIndex] : null;
     if (chordEntry) {
       const bassNotes = computeBassNotes(chordEntry, bassPreset, beatWithinChord, stepsPerChord);
+      const beatAccent = computeAccent(beatWithinChord, stepsPerChord, accentStrength);
+      const humanizeDepth = clamp(humanizeAmount / 100, 0, 1);
+      playBassNotes(bassNotes, beatMs, {
+        velocity: beatAccent,
+        accent: beatAccent,
+        humanize: true,
+        humanizeAmount: humanizeDepth,
+      });
+    } else if (customPlayback && customPlayback.midiNotes.length > 0) {
+      const bassNotes = computeBassNotesFromRootMidi(customPlayback.midiNotes[0], bassPreset, beatWithinChord, stepsPerChord);
       const beatAccent = computeAccent(beatWithinChord, stepsPerChord, accentStrength);
       const humanizeDepth = clamp(humanizeAmount / 100, 0, 1);
       playBassNotes(bassNotes, beatMs, {
@@ -3124,6 +3459,7 @@ function buildGraphNodeViews(state: AppState, layout: StageLayout): GraphNodeVie
       radius,
       isSelected,
       chordName: node.chordName,
+      displayChordLabel: chordLabel(effectiveNodeChordLabel(state, node)),
     });
   });
 
@@ -3692,7 +4028,7 @@ function drawFallback2d(
     ctx.font = `500 ${centerFontPx}px 'Cormorant Garamond', serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(view.chordName.slice(0, 9), view.x, view.y + 1);
+    ctx.fillText(view.displayChordLabel.slice(0, 9), view.x, view.y + 1);
     });
   }
 }
@@ -4407,12 +4743,20 @@ function openNodeTimingPanel(nodeId: number): void {
       ...state.settings,
       showNodeTimingPanel: true,
     },
-    status: `Opened node timing for ${state.graph.nodes[nodeId]?.chordName ?? "node"}`,
+    status: `Opened node ingredients for ${state.graph.nodes[nodeId]?.chordName ?? "node"}`,
   });
 }
 
 function closeNodeTimingPanel(): void {
   const state = store.getState();
+  const activeNodeId = state.nodeTimingModalNodeId;
+  if (activeNodeId !== null) {
+    delete nodeTimingCustomChordDrafts[activeNodeId];
+  }
+  restoreNodeTimingChordInputFocus = false;
+  nodeTimingChordInputCursor = 0;
+  nodeTimingChordInputSelectionEnd = 0;
+  nodeTimingChordInputSelectionDirection = "none";
   store.setState({
     ...state,
     nodeTimingModalNodeId: null,
@@ -4420,11 +4764,49 @@ function closeNodeTimingPanel(): void {
       ...state.settings,
       showNodeTimingPanel: false,
     },
-    status: "Node timing closed",
+    status: "Node ingredients closed",
   });
 }
 
+function effectiveNodeChordLabel(state: AppState, node: GraphNode): string {
+  const customPlayback = resolveNodeCustomPlaybackData(state, node);
+  return customPlayback?.tonesText ?? node.chordName;
+}
+
+function nodeTimingDraftInputValue(state: AppState, node: GraphNode): string {
+  const draft = nodeTimingCustomChordDrafts[node.id];
+  if (typeof draft === "string") {
+    return draft;
+  }
+  const storedRaw = node.customChordRawInput ?? "";
+  if (storedRaw.trim().length > 0) {
+    return storedRaw;
+  }
+  return defaultCustomChordInputFromNode(state, node);
+}
+
 function bindNodeTimingPanel(shell: HTMLElement): void {
+  const updateNode = (nodeId: number, updater: (node: GraphNode) => GraphNode, status?: string): void => {
+    const state = store.getState();
+    const node = state.graph.nodes[nodeId];
+    if (!node) {
+      return;
+    }
+    const graph = {
+      ...state.graph,
+      nodes: {
+        ...state.graph.nodes,
+        [nodeId]: updater(node),
+      },
+    };
+    saveGraph(graph);
+    store.setState({
+      ...state,
+      graph,
+      status: status ?? state.status,
+    });
+  };
+
   shell.querySelectorAll<HTMLElement>("[data-node-timing-action='close']").forEach((element) => {
     element.addEventListener("click", () => {
       closeNodeTimingPanel();
@@ -4441,9 +4823,158 @@ function bindNodeTimingPanel(shell: HTMLElement): void {
     store.setState({
       ...state,
       nodeTimingModalNodeId: nodeId,
-      status: `Editing timing for ${state.graph.nodes[nodeId]?.chordName ?? "node"}`,
+      status: `Editing ingredients for ${state.graph.nodes[nodeId]?.chordName ?? "node"}`,
     });
   });
+
+  const sourceSelect = shell.querySelector<HTMLSelectElement>("select[data-node-timing-setting='chord-source']");
+  sourceSelect?.addEventListener("change", () => {
+    const state = store.getState();
+    const nodeId = state.nodeTimingModalNodeId;
+    if (nodeId === null) {
+      return;
+    }
+    const node = state.graph.nodes[nodeId];
+    if (!node) {
+      return;
+    }
+    const enabled = sourceSelect.value === "custom";
+    const nextRawInput = enabled
+      ? nodeTimingDraftInputValue(state, node)
+      : (node.customChordRawInput ?? "");
+    nodeTimingCustomChordDrafts[nodeId] = nextRawInput;
+    const parsed = parseNodeCustomChord({
+      ...node,
+      customChordEnabled: enabled,
+      customChordRawInput: nextRawInput,
+    }, state.settings.centralTone);
+    updateNode(nodeId, (node) => ({
+      ...node,
+      customChordEnabled: enabled,
+      customChordRawInput: parsed ? nextRawInput : (node.customChordRawInput ?? ""),
+      customChordInputKind: parsed?.kind ?? node.customChordInputKind,
+      customChordTransposeWithCentralTone: node.customChordTransposeWithCentralTone === true,
+    }), enabled ? "Custom chord enabled for node" : "Catalog chord restored for node");
+  });
+
+  const transposeToggle = shell.querySelector<HTMLInputElement>("input[data-node-timing-setting='custom-transpose']");
+  transposeToggle?.addEventListener("change", () => {
+    const state = store.getState();
+    const nodeId = state.nodeTimingModalNodeId;
+    if (nodeId === null) {
+      return;
+    }
+    updateNode(nodeId, (node) => ({
+      ...node,
+      customChordTransposeWithCentralTone: transposeToggle.checked,
+    }), transposeToggle.checked ? "Custom chord transpose enabled" : "Custom chord transpose disabled");
+  });
+
+  const waveformSelect = shell.querySelector<HTMLSelectElement>("select[data-node-timing-setting='waveform-override']");
+  waveformSelect?.addEventListener("change", () => {
+    const state = store.getState();
+    const nodeId = state.nodeTimingModalNodeId;
+    if (nodeId === null) {
+      return;
+    }
+    const override = waveformSelect.value === "inherit" ? null : normalizeWaveform(waveformSelect.value);
+    updateNode(nodeId, (node) => ({
+      ...node,
+      waveformOverride: override,
+    }), override === null ? "Node waveform now inherits global setting" : `Node waveform set to ${override}`);
+  });
+
+  const effectsSelect = shell.querySelector<HTMLSelectElement>("select[data-node-timing-setting='effects-override']");
+  effectsSelect?.addEventListener("change", () => {
+    const state = store.getState();
+    const nodeId = state.nodeTimingModalNodeId;
+    if (nodeId === null) {
+      return;
+    }
+    const override = effectsSelect.value === "inherit" ? null : normalizeEffects(effectsSelect.value);
+    updateNode(nodeId, (node) => ({
+      ...node,
+      effectsOverride: override,
+    }), override === null ? "Node effects now inherit global setting" : `Node effects set to ${override}`);
+  });
+
+  const bassSelect = shell.querySelector<HTMLSelectElement>("select[data-node-timing-setting='bass-override']");
+  bassSelect?.addEventListener("change", () => {
+    const state = store.getState();
+    const nodeId = state.nodeTimingModalNodeId;
+    if (nodeId === null) {
+      return;
+    }
+    const override = bassSelect.value === "inherit" ? null : normalizeBassPreset(bassSelect.value);
+    updateNode(nodeId, (node) => ({
+      ...node,
+      bassPresetOverride: override,
+    }), override === null ? "Node bass now inherits global setting" : `Node bass set to ${BASS_PRESET_LABELS[override]}`);
+  });
+
+  const customInput = shell.querySelector<HTMLInputElement>("input[data-node-timing-input='custom-chord']");
+  const captureCustomInputSelection = (): void => {
+    if (!customInput) {
+      return;
+    }
+    nodeTimingChordInputCursor = customInput.selectionStart ?? customInput.value.length;
+    nodeTimingChordInputSelectionEnd = customInput.selectionEnd ?? nodeTimingChordInputCursor;
+    nodeTimingChordInputSelectionDirection = customInput.selectionDirection ?? "none";
+  };
+
+  customInput?.addEventListener("input", () => {
+    const state = store.getState();
+    const nodeId = state.nodeTimingModalNodeId;
+    if (nodeId === null) {
+      return;
+    }
+    const node = state.graph.nodes[nodeId];
+    if (!node || node.customChordEnabled !== true) {
+      return;
+    }
+    const rawInput = customInput.value;
+    nodeTimingCustomChordDrafts[nodeId] = rawInput;
+    restoreNodeTimingChordInputFocus = true;
+    captureCustomInputSelection();
+    const draftNode: GraphNode = {
+      ...node,
+      customChordRawInput: rawInput,
+    };
+    const parsedDraft = parseNodeCustomChord(draftNode, state.settings.centralTone);
+    if (!parsedDraft) {
+      return;
+    }
+    updateNode(nodeId, (currentNode) => ({
+      ...currentNode,
+      customChordRawInput: rawInput,
+      customChordInputKind: parsedDraft.kind,
+    }), `Custom chord ready: ${parsedDraft.tonesText}`
+    );
+  });
+
+  customInput?.addEventListener("focus", () => {
+    restoreNodeTimingChordInputFocus = true;
+    captureCustomInputSelection();
+  });
+
+  customInput?.addEventListener("keyup", captureCustomInputSelection);
+  customInput?.addEventListener("click", captureCustomInputSelection);
+
+  customInput?.addEventListener("blur", (event) => {
+    const focusEvent = event as FocusEvent;
+    const nextTarget = focusEvent.relatedTarget;
+    if (nextTarget instanceof HTMLElement && nextTarget.closest(".node-timing-modal")) {
+      restoreNodeTimingChordInputFocus = false;
+    }
+    captureCustomInputSelection();
+  });
+
+  if (customInput && restoreNodeTimingChordInputFocus) {
+    customInput.focus();
+    const start = clamp(nodeTimingChordInputCursor, 0, customInput.value.length);
+    const end = clamp(nodeTimingChordInputSelectionEnd, start, customInput.value.length);
+    customInput.setSelectionRange(start, end, nodeTimingChordInputSelectionDirection);
+  }
 
   const makeHeadButton = shell.querySelector<HTMLButtonElement>("button[data-node-timing-action='make-head']");
   makeHeadButton?.addEventListener("click", () => {
@@ -4505,6 +5036,58 @@ function bindNodeTimingPanel(shell: HTMLElement): void {
     appendDebugLog(
       `[ui] node timing id=${nodeId} chord="${node.chordName}" override=${override === null ? "inherit" : override}`,
     );
+  });
+
+  const testChordButton = shell.querySelector<HTMLButtonElement>("button[data-node-timing-action='test-chord']");
+  testChordButton?.addEventListener("click", () => {
+    const state = store.getState();
+    const nodeId = state.nodeTimingModalNodeId;
+    if (nodeId === null) {
+      return;
+    }
+    const node = state.graph.nodes[nodeId];
+    if (!node) {
+      return;
+    }
+    const nodeWaveform = effectiveWaveformForNode(state, node);
+    const nodeEffects = effectiveEffectsForNode(state, node);
+    const customPlayback = resolveNodeCustomPlaybackData(state, node);
+    if (customPlayback) {
+      playChordPreview({ full_name: node.chordName || customPlayback.label }, {
+        pulseNodeId: nodeId,
+        midiNotesOverride: customPlayback.midiNotes,
+        tonesTextOverride: customPlayback.tonesText,
+        labelOverride: customPlayback.label,
+        familyNameOverride: "Custom",
+        waveformOverride: nodeWaveform,
+        effectsOverride: nodeEffects,
+      });
+      store.setState({
+        ...state,
+        status: `Tested ${customPlayback.label}`,
+      });
+      return;
+    }
+
+    const match = findChordInCatalog(state.catalog, node.chordName);
+    const chord = match ? state.catalog.families[match.familyIndex]?.chords[match.chordIndex] : null;
+    if (chord) {
+      playChordPreview(chord, {
+        pulseNodeId: nodeId,
+        waveformOverride: nodeWaveform,
+        effectsOverride: nodeEffects,
+      });
+      store.setState({
+        ...state,
+        status: `Tested catalog chord ${chord.full_name}`,
+      });
+      return;
+    }
+
+    store.setState({
+      ...state,
+      status: "No valid chord available to test for this node",
+    });
   });
 }
 
@@ -4918,8 +5501,7 @@ function render(): void {
   const canUseModalFastPath = anyModalOpen
     && shellExists
     && modalKey === prevModalKey
-    && !state.settings.showSavedLoopsPanel
-    && !state.settings.showNodeTimingPanel;
+    && !state.settings.showSavedLoopsPanel;
 
   // When a modal is already open and its visibility didn't change, skip full
   // innerHTML re-render to preserve open <select> dropdowns and focused inputs.
@@ -4963,6 +5545,35 @@ function render(): void {
       const cursor = clamp(savedLoopNameCursor, 0, savedLoopNameInput.value.length);
       savedLoopNameInput.setSelectionRange(cursor, cursor);
       restoreSavedLoopNameFocus = false;
+    }
+    if (state.settings.showNodeTimingPanel) {
+      const activeNodeId = state.nodeTimingModalNodeId ?? state.graph.selectedNodeId;
+      const activeNode = state.graph.nodes[activeNodeId] ?? null;
+      if (activeNode) {
+        const customInputValue = nodeTimingDraftInputValue(state, activeNode);
+        const parsedCustom = parseNodeCustomChord(
+          {
+            ...activeNode,
+            customChordRawInput: customInputValue,
+          },
+          state.settings.centralTone,
+        );
+        const previewText = activeNode.customChordEnabled === true
+          ? (parsedCustom?.tonesText ?? "invalid")
+          : "catalog chord";
+        const previewEl = root.querySelector<HTMLElement>("[data-node-timing-custom-preview]");
+        if (previewEl) {
+          previewEl.textContent = previewText;
+        }
+
+        const effectiveSoundEl = root.querySelector<HTMLElement>("[data-node-timing-effective-sound]");
+        if (effectiveSoundEl) {
+          const waveform = effectiveWaveformForNode(state, activeNode);
+          const effects = effectiveEffectsForNode(state, activeNode);
+          const bass = effectiveBassPresetForNode(state, activeNode);
+          effectiveSoundEl.textContent = `${waveform} · ${effects} · ${BASS_PRESET_LABELS[bass]}`;
+        }
+      }
     }
     return;
   }
