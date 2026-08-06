@@ -3023,6 +3023,53 @@ function buildGraphNodeViews(state: AppState, layout: StageLayout): GraphNodeVie
   return views;
 }
 
+function panTowardsNode(canvas: HTMLCanvasElement, nodeId: number, amount = 0.88): void {
+  const offset = nodeOffsets[nodeId];
+  if (!offset) {
+    return;
+  }
+
+  if (addNodePanRafId) {
+    window.cancelAnimationFrame(addNodePanRafId);
+    addNodePanRafId = 0;
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) {
+    return;
+  }
+
+  const startPanX = scenePan.x;
+  const startPanY = scenePan.y;
+  // Centering the node means moving scene pan toward the inverse node offset.
+  const targetPanX = -offset.x;
+  const targetPanY = -offset.y;
+  const panAmount = clamp(amount, 0, 1);
+  const endPanX = startPanX + (targetPanX - startPanX) * panAmount;
+  const endPanY = startPanY + (targetPanY - startPanY) * panAmount;
+  const startedAt = performance.now();
+  const durationMs = 220;
+
+  const animatePan = (now: number): void => {
+    const t = clamp((now - startedAt) / durationMs, 0, 1);
+    const eased = 1 - Math.pow(1 - t, 3);
+
+    scenePan.x = startPanX + (endPanX - startPanX) * eased;
+    scenePan.y = startPanY + (endPanY - startPanY) * eased;
+    redrawCanvasOnly(canvas);
+
+    if (t < 1) {
+      addNodePanRafId = window.requestAnimationFrame(animatePan);
+      return;
+    }
+
+    addNodePanRafId = 0;
+    saveInteractionState();
+  };
+
+  addNodePanRafId = window.requestAnimationFrame(animatePan);
+}
+
 function constrainGraphViewport(state: AppState, layout: StageLayout): void {
   const views = buildGraphNodeViews(state, layout);
   if (views.length === 0) {
@@ -3576,6 +3623,7 @@ let resizeObserver: ResizeObserver | null = null;
 let pressContext: GestureContext | null = null;
 let webglUnavailable = false;
 const FORCE_CANVAS_RENDERER = true;
+let addNodePanRafId = 0;
 
 function selectFamily(index: number): void {
   const state = store.getState();
@@ -3645,6 +3693,7 @@ function addNode(): void {
 
   const canvas = root.querySelector<HTMLCanvasElement>(".webgl-stage");
   if (canvas) {
+    panTowardsNode(canvas, insertedNodeId);
     redrawCanvasOnly(canvas);
   }
 }
@@ -4753,6 +4802,10 @@ window.addEventListener("beforeunload", () => {
   if (centerPulseRafId) {
     window.cancelAnimationFrame(centerPulseRafId);
     centerPulseRafId = 0;
+  }
+  if (addNodePanRafId) {
+    window.cancelAnimationFrame(addNodePanRafId);
+    addNodePanRafId = 0;
   }
   if (rafId) {
     window.cancelAnimationFrame(rafId);
