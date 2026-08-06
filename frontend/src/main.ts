@@ -51,6 +51,7 @@ type GraphNode = {
   type: GraphNodeType;
   chordName: string;
   beatsPerChordOverride?: number | null;
+  muted?: boolean;
   waveformOverride?: WaveformOption | null;
   effectsOverride?: EffectOption | null;
   bassPresetOverride?: BassPresetOption | null;
@@ -63,6 +64,7 @@ type GraphNode = {
 
 type LoopGraph = {
   headId: number;
+  headIds?: number[];
   selectedNodeId: number;
   nextNodeId: number;
   nodes: Record<number, GraphNode>;
@@ -374,6 +376,7 @@ function wrapIndex(index: number, length: number): number {
 function createInitialGraph(initialChord: string): LoopGraph {
   return {
     headId: 0,
+    headIds: [0],
     selectedNodeId: 0,
     nextNodeId: 1,
     nodes: {
@@ -382,6 +385,7 @@ function createInitialGraph(initialChord: string): LoopGraph {
         type: "chord-selection",
         chordName: initialChord,
         beatsPerChordOverride: null,
+        muted: false,
         waveformOverride: null,
         effectsOverride: null,
         bassPresetOverride: null,
@@ -429,23 +433,211 @@ function selectedNodeActionSymbols(state: AppState): { add: string; remove: stri
   return graphNodeTypeConfig(node.type).actionSymbols;
 }
 
-function graphSequence(graph: LoopGraph, maxSteps = 128): GraphNode[] {
-  const output: GraphNode[] = [];
-  const visited = new Set<number>();
-  let cursor = graph.headId;
-
-  for (let step = 0; step < maxSteps; step += 1) {
-    const node = graph.nodes[cursor];
-    if (!node || visited.has(node.id)) {
-      break;
+function graphHeadIds(graph: LoopGraph): number[] {
+  const heads: number[] = [];
+  const seen = new Set<number>();
+  const pushHead = (value: unknown): void => {
+    const id = Number(value);
+    if (!Number.isFinite(id) || seen.has(id) || !graph.nodes[id]) {
+      return;
     }
-    output.push(node);
-    visited.add(node.id);
-    cursor = node.nextId;
-    if (cursor === graph.headId) {
-      break;
+    seen.add(id);
+    heads.push(id);
+  };
+
+  if (Array.isArray(graph.headIds)) {
+    graph.headIds.forEach((id) => pushHead(id));
+  }
+  pushHead(graph.headId);
+
+  if (heads.length === 0) {
+    const fallback = Object.keys(graph.nodes)
+      .map((value) => Number(value))
+      .find((id) => Number.isFinite(id) && !!graph.nodes[id]);
+    if (fallback !== undefined) {
+      heads.push(fallback);
     }
   }
+
+  return heads;
+}
+
+function normalizeGraphHeads(graph: LoopGraph): LoopGraph {
+  const heads = graphHeadIds(graph);
+  return {
+    ...graph,
+    headId: heads[0] ?? graph.headId,
+    headIds: heads,
+  };
+}
+
+function collectReachableNodeIds(graph: LoopGraph, startId: number, maxSteps = 2048): Set<number> {
+  const reachable = new Set<number>();
+  let cursor = startId;
+  for (let step = 0; step < maxSteps; step += 1) {
+    const node = graph.nodes[cursor];
+    if (!node || reachable.has(node.id)) {
+      break;
+    }
+    reachable.add(node.id);
+    cursor = node.nextId;
+  }
+  return reachable;
+}
+
+function setNodeAsGraphHead(graph: LoopGraph, nodeId: number): LoopGraph {
+  if (!graph.nodes[nodeId]) {
+    return graph;
+  }
+
+  const currentHeads = graphHeadIds(graph);
+  const nextHeads: number[] = [];
+  let replaced = false;
+
+  currentHeads.forEach((headId) => {
+    const reachable = collectReachableNodeIds(graph, headId);
+    if (reachable.has(nodeId)) {
+      if (!replaced) {
+        nextHeads.push(nodeId);
+        replaced = true;
+      }
+      return;
+    }
+    nextHeads.push(headId);
+  });
+
+  if (!replaced) {
+    nextHeads.push(nodeId);
+  }
+
+  const normalizedHeads = Array.from(new Set(nextHeads)).filter((id) => !!graph.nodes[id]);
+  const fallbackHead = normalizedHeads[0] ?? nodeId;
+
+  return normalizeGraphHeads({
+    ...graph,
+    headId: fallbackHead,
+    headIds: normalizedHeads.length > 0 ? normalizedHeads : [fallbackHead],
+  });
+}
+
+function sanitizeLoopGraph(graph: Partial<LoopGraph> | null | undefined): LoopGraph | null {
+  if (!graph || !graph.nodes || typeof graph.nodes !== "object") {
+    return null;
+  }
+
+  const normalizedNodes: Record<number, GraphNode> = {};
+  let maxNodeId = -1;
+
+  for (const [nodeIdText, rawNode] of Object.entries(graph.nodes)) {
+    const nodeId = Number(nodeIdText);
+    if (!Number.isFinite(nodeId)) {
+      continue;
+    }
+
+    const sourceNode = rawNode as Partial<GraphNode> | undefined;
+    const nextId = Number(sourceNode?.nextId);
+    normalizedNodes[nodeId] = {
+      id: nodeId,
+      type: sourceNode?.type === "chord-selection" ? "chord-selection" : "chord-selection",
+      chordName:
+        typeof sourceNode?.chordName === "string" && sourceNode.chordName.trim().length > 0
+          ? sourceNode.chordName
+          : "Cmaj7add9",
+      beatsPerChordOverride: sourceNode?.beatsPerChordOverride ?? null,
+      muted: sourceNode?.muted === true,
+      waveformOverride: sourceNode?.waveformOverride ?? null,
+      effectsOverride: sourceNode?.effectsOverride ?? null,
+      bassPresetOverride: sourceNode?.bassPresetOverride ?? null,
+      customChordEnabled: sourceNode?.customChordEnabled === true,
+      customChordInputKind: sourceNode?.customChordInputKind === "midi" ? "midi" : "tones",
+      customChordRawInput: typeof sourceNode?.customChordRawInput === "string" ? sourceNode.customChordRawInput : "",
+      customChordTransposeWithCentralTone: sourceNode?.customChordTransposeWithCentralTone === true,
+      nextId: Number.isFinite(nextId) ? nextId : nodeId,
+    };
+    maxNodeId = Math.max(maxNodeId, nodeId);
+  }
+
+  const nodeIds = Object.keys(normalizedNodes).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  if (nodeIds.length === 0) {
+    return null;
+  }
+
+  nodeIds.forEach((nodeId) => {
+    const node = normalizedNodes[nodeId];
+    if (!node) {
+      return;
+    }
+    if (!normalizedNodes[node.nextId]) {
+      node.nextId = node.id;
+    }
+  });
+
+  const fallbackHead = nodeIds[0];
+  const candidateHeadValues = Array.isArray(graph.headIds)
+    ? [...graph.headIds, graph.headId]
+    : [graph.headId];
+  const headIds: number[] = [];
+  const seenHeads = new Set<number>();
+  candidateHeadValues.forEach((value) => {
+    const headId = Number(value);
+    if (!Number.isFinite(headId) || seenHeads.has(headId) || !normalizedNodes[headId]) {
+      return;
+    }
+    seenHeads.add(headId);
+    headIds.push(headId);
+  });
+  if (headIds.length === 0) {
+    headIds.push(fallbackHead);
+  }
+
+  const selectedCandidate = Number(graph.selectedNodeId);
+  const selectedNodeId = Number.isFinite(selectedCandidate) && normalizedNodes[selectedCandidate]
+    ? selectedCandidate
+    : headIds[0];
+  const nextNodeCandidate = Number(graph.nextNodeId);
+  const nextNodeId = Number.isFinite(nextNodeCandidate)
+    ? Math.max(nextNodeCandidate, maxNodeId + 1)
+    : maxNodeId + 1;
+
+  return normalizeGraphHeads({
+    headId: headIds[0],
+    headIds,
+    selectedNodeId,
+    nextNodeId,
+    nodes: normalizedNodes,
+  });
+}
+
+function graphSequence(graph: LoopGraph, maxSteps = 512): GraphNode[] {
+  const output: GraphNode[] = [];
+  const visited = new Set<number>();
+  let safetySteps = 0;
+
+  const walkFrom = (startId: number): void => {
+    let cursor = startId;
+    for (let step = 0; step < maxSteps; step += 1) {
+      if (safetySteps >= maxSteps * 4) {
+        return;
+      }
+      safetySteps += 1;
+      const node = graph.nodes[cursor];
+      if (!node || visited.has(node.id)) {
+        return;
+      }
+      output.push(node);
+      visited.add(node.id);
+      cursor = node.nextId;
+    }
+  };
+
+  graphHeadIds(graph).forEach((headId) => walkFrom(headId));
+  Object.keys(graph.nodes).forEach((key) => {
+    const nodeId = Number(key);
+    if (!Number.isFinite(nodeId) || visited.has(nodeId)) {
+      return;
+    }
+    walkFrom(nodeId);
+  });
 
   return output;
 }
@@ -466,7 +658,7 @@ function addAfterSelected(graph: LoopGraph, chordName: string): LoopGraph {
   }
 
   const newId = graph.nextNodeId;
-  return {
+  const nextGraph: LoopGraph = {
     ...graph,
     selectedNodeId: newId,
     nextNodeId: newId + 1,
@@ -478,6 +670,7 @@ function addAfterSelected(graph: LoopGraph, chordName: string): LoopGraph {
         type: selected.type,
         chordName,
         beatsPerChordOverride: selected.beatsPerChordOverride ?? null,
+        muted: selected.muted === true,
         waveformOverride: selected.waveformOverride ?? null,
         effectsOverride: selected.effectsOverride ?? null,
         bassPresetOverride: selected.bassPresetOverride ?? null,
@@ -489,6 +682,7 @@ function addAfterSelected(graph: LoopGraph, chordName: string): LoopGraph {
       },
     },
   };
+  return normalizeGraphHeads(nextGraph);
 }
 
 function removeSelected(graph: LoopGraph): LoopGraph {
@@ -513,12 +707,25 @@ function removeSelected(graph: LoopGraph): LoopGraph {
     nextId: target.nextId,
   };
 
-  return {
+  const currentHeads = graphHeadIds(graph);
+  const nextHeads = currentHeads.filter((id) => id !== target.id);
+  if (currentHeads.includes(target.id)) {
+    const replacementHead = target.nextId;
+    if (updatedNodes[replacementHead] && !nextHeads.includes(replacementHead)) {
+      nextHeads.push(replacementHead);
+    }
+  }
+  const compactHeads = nextHeads.filter((id) => !!updatedNodes[id]);
+  const fallbackHead = compactHeads[0] ?? Number(Object.keys(updatedNodes)[0] ?? 0);
+
+  const nextGraph: LoopGraph = {
     ...graph,
-    headId: target.id === graph.headId ? target.nextId : graph.headId,
-    selectedNodeId: target.id === graph.headId ? target.nextId : predecessor.id,
+    headId: fallbackHead,
+    headIds: compactHeads.length > 0 ? compactHeads : [fallbackHead],
+    selectedNodeId: predecessor.id,
     nodes: updatedNodes,
   };
+  return normalizeGraphHeads(nextGraph);
 }
 
 function nextSelected(graph: LoopGraph): LoopGraph {
@@ -653,21 +860,13 @@ function loadSavedGraph(): LoopGraph | null {
     if (!raw) {
       return null;
     }
-    const parsed = JSON.parse(raw) as LoopGraph;
-    if (!parsed.nodes || typeof parsed.headId !== "number") {
+    const parsed = JSON.parse(raw) as Partial<LoopGraph>;
+    const sanitizedGraph = sanitizeLoopGraph(parsed);
+    if (!sanitizedGraph) {
       return null;
     }
-    if (!parsed.nodes[parsed.headId]) {
-      return null;
-    }
-    const selectedNodeId = typeof parsed.selectedNodeId === "number" && parsed.nodes[parsed.selectedNodeId]
-      ? parsed.selectedNodeId
-      : parsed.headId;
-    const nextNodeId = typeof parsed.nextNodeId === "number"
-      ? parsed.nextNodeId
-      : (Math.max(...Object.keys(parsed.nodes).map((value) => Number(value))) + 1);
     const normalizedNodes: Record<number, GraphNode> = {};
-    for (const [nodeIdText, node] of Object.entries(parsed.nodes)) {
+    for (const [nodeIdText, node] of Object.entries(sanitizedGraph.nodes)) {
       const nodeId = Number(nodeIdText);
       if (!Number.isFinite(nodeId)) {
         continue;
@@ -675,6 +874,7 @@ function loadSavedGraph(): LoopGraph | null {
       normalizedNodes[nodeId] = {
         ...node,
         beatsPerChordOverride: normalizeNodeBeatsOverride(node.beatsPerChordOverride),
+        muted: node.muted === true,
         waveformOverride: node.waveformOverride == null ? null : normalizeWaveform(node.waveformOverride),
         effectsOverride: node.effectsOverride == null ? null : normalizeEffects(node.effectsOverride),
         bassPresetOverride: node.bassPresetOverride == null ? null : normalizeBassPreset(node.bassPresetOverride),
@@ -684,12 +884,16 @@ function loadSavedGraph(): LoopGraph | null {
         customChordTransposeWithCentralTone: node.customChordTransposeWithCentralTone === true,
       };
     }
-    return {
-      ...parsed,
-      selectedNodeId,
+    const nextNodeId = Math.max(
+      sanitizedGraph.nextNodeId,
+      Math.max(...Object.keys(normalizedNodes).map((value) => Number(value))) + 1,
+    );
+    const normalizedGraph: LoopGraph = {
+      ...sanitizedGraph,
       nextNodeId,
       nodes: normalizedNodes,
     };
+    return normalizeGraphHeads(normalizedGraph);
   } catch {
     return null;
   }
@@ -735,11 +939,25 @@ function loadSavedLoops(): SavedLoopRecord[] {
     if (!raw) {
       return [];
     }
-    const parsed = JSON.parse(raw) as SavedLoopRecord[];
+    const parsed = JSON.parse(raw) as Partial<SavedLoopRecord>[];
     if (!Array.isArray(parsed)) {
       return [];
     }
-    return parsed.filter((loop) => loop && typeof loop.id === "string" && typeof loop.name === "string");
+    const loops: SavedLoopRecord[] = [];
+    parsed.forEach((loop) => {
+      if (!loop || typeof loop.id !== "string" || typeof loop.name !== "string") {
+        return;
+      }
+      const graph = sanitizeLoopGraph(loop.graph as Partial<LoopGraph> | undefined);
+      if (!graph) {
+        return;
+      }
+      loops.push({
+        ...(loop as SavedLoopRecord),
+        graph,
+      });
+    });
+    return loops;
   } catch {
     return [];
   }
@@ -1086,11 +1304,11 @@ function resolveNodeCustomPlaybackData(state: AppState, node: GraphNode): NodeCu
   };
 }
 
-function effectiveBeatsPerChordForNode(state: AppState, nodeId: number | null): number {
+function effectiveBeatsPerChordForNode(state: AppState, nodeId: number | null, graph: LoopGraph = state.graph): number {
   if (nodeId === null) {
     return normalizeBeatsPerChord(state.settings.beatsPerChord);
   }
-  const node = state.graph.nodes[nodeId];
+  const node = graph.nodes[nodeId];
   if (!node) {
     return normalizeBeatsPerChord(state.settings.beatsPerChord);
   }
@@ -1334,6 +1552,7 @@ function withSelectedNodeChord(graph: LoopGraph, chordName: string): LoopGraph {
       [selected.id]: {
         ...selected,
         chordName,
+        customChordEnabled: false,
       },
     },
   };
@@ -1661,6 +1880,7 @@ function playChordPreview(
   chord: ChordEntry,
   options?: {
     pulseNodeId?: number;
+    pulseColorIndex?: number;
     sustainMs?: number;
     velocity?: number;
     humanize?: boolean;
@@ -1674,7 +1894,7 @@ function playChordPreview(
     effectsOverride?: EffectOption;
   },
 ): void {
-  triggerCenterPulse(options?.pulseNodeId);
+  triggerCenterPulse(options?.pulseNodeId, options?.pulseColorIndex ?? 0);
 
   const state = store.getState();
   const waveform = options?.waveformOverride ?? state.settings.waveform;
@@ -1855,12 +2075,12 @@ async function refreshMidiPorts(): Promise<void> {
 const initialSettings = loadSettings();
 const initialCatalog = transposeCatalogForCentralTone(CATALOG_TEMPLATE, initialSettings.centralTone);
 const savedGraph = loadSavedGraph();
-const startingGraph = savedGraph ?? createInitialGraph(initialChordName(initialCatalog));
+const startingGraph = normalizeGraphHeads(savedGraph ?? createInitialGraph(initialChordName(initialCatalog)));
 const persistedInteraction = loadInteractionState();
 const initialSavedLoops = loadSavedLoops();
 const initialSelectedNode =
   startingGraph.nodes[startingGraph.selectedNodeId] ??
-  startingGraph.nodes[startingGraph.headId];
+  startingGraph.nodes[graphHeadIds(startingGraph)[0]];
 const initialSelection = initialSelectedNode
   ? findChordInCatalog(initialCatalog, initialSelectedNode.chordName)
   : null;
@@ -2412,7 +2632,7 @@ class WebGlStage {
     this.currentGeometry = geometry;
     this.chordActive = clamp(state.selectedChordIndex, 0, geometry.chordSegments.length - 1);
     this.familyActive = clamp(state.selectedFamilyIndex, 0, geometry.familySegments.length - 1);
-    this.removeDisabled = state.graph.selectedNodeId === state.graph.headId ? 1 : 0;
+    this.removeDisabled = graphSequence(state.graph).length <= 1 ? 1 : 0;
   }
 
   private resizeViewport(): void {
@@ -2537,6 +2757,7 @@ function overlay(rootEl: HTMLElement, state: AppState, layout: StageLayout, geom
       <div class="corner-controls" role="toolbar" aria-label="Loop controls">
         <button class="corner-btn" data-action="settings" aria-label="Settings" title="Settings">⚙</button>
         <button class="corner-btn" data-action="saved-loops" aria-label="Saved loops" title="Saved loops">📖</button>
+        <button class="corner-btn" data-action="add-initial" aria-label="Add initial state" title="Add initial state">◎</button>
         <button class="corner-btn perform ${performPlaying ? "playing" : "paused"}" data-action="perform" aria-label="Perform" title="Perform">
           ${performPlaying ? "❚❚" : "▶"}
         </button>
@@ -2726,11 +2947,12 @@ function buildPerformPanel(state: AppState): string {
 function buildNodeTimingPanel(state: AppState): string {
   const settings = state.settings;
   const sequence = graphSequence(state.graph);
+  const initialIds = graphHeadIds(state.graph);
   const activeNodeId = state.nodeTimingModalNodeId ?? state.graph.selectedNodeId;
   const activeNode = state.graph.nodes[activeNodeId] ?? null;
   const nodeOptions = sequence
     .map((node, index) => {
-      const label = `${index + 1}. ${node.chordName}${node.id === state.graph.headId ? " (Initial)" : ""}`;
+      const label = `${index + 1}. ${node.chordName}${initialIds.includes(node.id) ? " (Initial)" : ""}`;
       return `<option value="${node.id}" ${node.id === activeNodeId ? "selected" : ""}>${escapeHtml(label)}</option>`;
     })
     .join("");
@@ -2740,9 +2962,12 @@ function buildNodeTimingPanel(state: AppState): string {
   const effective = activeNode
     ? bpcLabel(effectiveBeatsPerChordForNode(state, activeNode.id))
     : bpcLabel(normalizeBeatsPerChord(state.settings.beatsPerChord));
-  const headNode = state.graph.nodes[state.graph.headId] ?? null;
-  const isActiveNodeHead = activeNode?.id === state.graph.headId;
+  const initialNames = initialIds
+    .map((id) => state.graph.nodes[id]?.chordName)
+    .filter((name): name is string => !!name);
+  const isActiveNodeHead = !!activeNode && initialIds.includes(activeNode.id);
   const customEnabled = activeNode?.customChordEnabled === true;
+  const muted = activeNode?.muted === true;
   const customRaw = activeNode?.customChordRawInput ?? "";
   const customInputValue = activeNode ? nodeTimingDraftInputValue(state, activeNode) : customRaw;
   const customTranspose = activeNode?.customChordTransposeWithCentralTone === true;
@@ -2805,16 +3030,20 @@ function buildNodeTimingPanel(state: AppState): string {
             <strong>${escapeHtml(effective)}</strong>
           </div>
           <div class="settings-field inline node-timing-info">
-            <span>Current Initial State</span>
-            <strong>${escapeHtml(headNode?.chordName ?? "node")}</strong>
+            <span>Initial States</span>
+            <strong>${escapeHtml(initialNames.join(" · ") || "node")}</strong>
           </div>
-          <button class="saved-loop-save-btn node-timing-head-btn" data-node-timing-action="make-head" type="button" ${isActiveNodeHead ? "disabled" : ""}>${isActiveNodeHead ? "Already Initial State" : "Make This Node Initial State"}</button>
+          <button class="saved-loop-save-btn node-timing-head-btn" data-node-timing-action="make-head" type="button" ${isActiveNodeHead ? "disabled" : ""}>${isActiveNodeHead ? "Already Initial State" : "Set As Initial State"}</button>
           <label class="settings-field">
             <span>Chord Source</span>
             <select data-node-timing-setting="chord-source">
               <option value="catalog" ${customEnabled ? "" : "selected"}>Catalog chord (${escapeHtml(activeNode?.chordName ?? "")})</option>
               <option value="custom" ${customEnabled ? "selected" : ""}>Custom chord</option>
             </select>
+          </label>
+          <label class="settings-field inline">
+            <span>Mute Node</span>
+            <input type="checkbox" data-node-timing-setting="muted" ${muted ? "checked" : ""} />
           </label>
           <label class="settings-field inline">
             <span>Transpose With Central Tone</span>
@@ -2927,6 +3156,7 @@ function buildOverlayContent(state: AppState, layout: StageLayout, geometry: Sce
     ? (selectedRingRomanNumeral(state) ?? bandLabel(family.name))
     : bandLabel(family.name);
   const nodeViews = buildGraphNodeViews(state, layout);
+  const initialNodeIds = new Set(graphHeadIds(state.graph));
   const selectedView = nodeViews.find((view) => view.isSelected);
   const activeCenterX = selectedView?.x ?? layout.centerX;
   const activeCenterY = selectedView?.y ?? layout.centerY;
@@ -3002,11 +3232,16 @@ type GestureContext = {
 let sceneZoom = initialSceneZoom;
 let scenePan = { ...initialScenePan };
 let performPlaying = false;
-let performTimerId: number | null = null;
-let performCursorNodeId: number | null = null;
-let performStepCount = 0;
-let performBeatWithinChord = 0;
-let performCurrentChordSteps = 1;
+type PerformTrackState = {
+  headId: number;
+  pulseColorIndex: number;
+  cursorNodeId: number | null;
+  stepCount: number;
+  beatWithinChord: number;
+  currentChordSteps: number;
+  timerId: number | null;
+};
+const performTracks: Record<number, PerformTrackState> = {};
 let modalOpenCount = 0;
 let resumePerformAfterModalClose = false;
 let debugFooterDraft = "";
@@ -3143,22 +3378,39 @@ activeSavedLoopId = store.getState().savedLoopSelectedId;
 activeSavedLoopSignature = currentLoopStateSignature(store.getState());
 
 const CENTER_PULSE_MS = 620;
-let centerPulseStartMs = 0;
 let centerPulseRafId = 0;
-let centerPulseNodeId: number | null = null;
+type ActiveNodePulse = {
+  nodeId: number | null;
+  colorIndex: number;
+  startMs: number;
+};
+let activeNodePulses: ActiveNodePulse[] = [];
+
+const PULSE_COLOR_PALETTE = [
+  "132, 236, 255",
+  "160, 248, 198",
+  "255, 210, 132",
+  "191, 202, 255",
+  "255, 176, 200",
+];
 
 function stopPerformLoop(): void {
-  if (performTimerId !== null) {
-    window.clearTimeout(performTimerId);
-    performTimerId = null;
-  }
+  Object.values(performTracks).forEach((track) => {
+    if (track.timerId !== null) {
+      window.clearTimeout(track.timerId);
+      track.timerId = null;
+    }
+  });
+  Object.keys(performTracks).forEach((key) => {
+    delete performTracks[Number(key)];
+  });
   performPlaying = false;
 }
 
-function currentPerformStepMs(): number {
+function currentPerformStepMs(track: PerformTrackState): number {
   const state = store.getState();
   const { bpm, swing } = state.settings;
-  const bpc = effectiveBeatsPerChordForNode(state, performCursorNodeId);
+  const bpc = effectiveBeatsPerChordForNode(state, track.cursorNodeId);
   // For sub-beat values the timer fires every bpc beats; for whole beats it fires every 1 beat.
   const stepBeats = bpc < 1 ? bpc : 1;
   const beatMs = 60000 / clamp(bpm, 40, 240);
@@ -3167,36 +3419,40 @@ function currentPerformStepMs(): number {
     return stepMs;
   }
   const swingRatio = clamp(swing / 100, 0, 0.75);
-  const isOddStep = performStepCount % 2 === 1;
+  const isOddStep = track.stepCount % 2 === 1;
   const multiplier = isOddStep ? 1 - swingRatio * 0.5 : 1 + swingRatio * 0.5;
   return stepMs * multiplier;
 }
 
-function scheduleNextPerformStep(): void {
+function scheduleNextPerformStep(track: PerformTrackState): void {
   if (!performPlaying) {
     return;
   }
-  const delayMs = currentPerformStepMs();
-  performTimerId = window.setTimeout(() => {
+  const delayMs = currentPerformStepMs(track);
+  track.timerId = window.setTimeout(() => {
     if (!performPlaying) {
       return;
     }
-    performStepCount += 1;
-    performStep();
-    scheduleNextPerformStep();
+    track.stepCount += 1;
+    performStep(track);
+    scheduleNextPerformStep(track);
   }, delayMs);
 }
 
-function pulseStrengthAt(nowMs: number): number {
-  if (centerPulseStartMs <= 0) {
+function pulseStrengthForStart(startMs: number, nowMs: number): number {
+  if (startMs <= 0) {
     return 0;
   }
-  const elapsed = nowMs - centerPulseStartMs;
+  const elapsed = nowMs - startMs;
   if (elapsed < 0 || elapsed > CENTER_PULSE_MS) {
     return 0;
   }
   const t = clamp(elapsed / CENTER_PULSE_MS, 0, 1);
   return Math.sin(t * Math.PI) * (1 - t * 0.25);
+}
+
+function hasActivePulses(nowMs: number): boolean {
+  return activeNodePulses.some((pulse) => pulseStrengthForStart(pulse.startMs, nowMs) > 0.001);
 }
 
 function schedulePulseRedraw(): void {
@@ -3212,18 +3468,23 @@ function schedulePulseRedraw(): void {
     }
 
     redrawCanvasOnly(canvas);
-    if (pulseStrengthAt(nowMs) > 0) {
+    if (hasActivePulses(nowMs)) {
       schedulePulseRedraw();
     }
   });
 }
 
-function triggerCenterPulse(nodeId?: number): void {
-  if (pulseStrengthAt(performance.now()) > 0.001) {
-    return;
+function triggerCenterPulse(nodeId?: number, colorIndex = 0): void {
+  const now = performance.now();
+  activeNodePulses = activeNodePulses.filter((pulse) => pulseStrengthForStart(pulse.startMs, now) > 0.001);
+  activeNodePulses.push({
+    nodeId: nodeId ?? null,
+    colorIndex,
+    startMs: now,
+  });
+  if (activeNodePulses.length > 24) {
+    activeNodePulses = activeNodePulses.slice(activeNodePulses.length - 24);
   }
-  centerPulseNodeId = nodeId ?? null;
-  centerPulseStartMs = performance.now();
   schedulePulseRedraw();
 }
 
@@ -3237,15 +3498,20 @@ function syncSelectionToNode(
     humanize?: boolean;
     humanizeAmount?: number;
     layerWidth?: number;
+    playbackGraph?: LoopGraph;
+    pulseNodeId?: number;
+    pulseColorIndex?: number;
   },
 ): void {
   const state = store.getState();
-  const node = state.graph.nodes[nodeId];
+  const playbackGraph = options?.playbackGraph ?? state.graph;
+  const node = playbackGraph.nodes[nodeId];
   if (!node) {
     return;
   }
 
   const updateSelection = options?.updateSelection ?? true;
+  const nodeMuted = node.muted === true;
 
   const nodeWaveform = effectiveWaveformForNode(state, node);
   const nodeEffects = effectiveEffectsForNode(state, node);
@@ -3258,11 +3524,12 @@ function syncSelectionToNode(
     }
     : state.graph;
 
-  if (customPlayback) {
+  if (!nodeMuted && customPlayback) {
     const skipSound = !state.settings.alwaysPlayChords && performPlaying && updateSelection;
     if (!skipSound) {
       playChordPreview({ full_name: node.chordName || customPlayback.label }, {
-        pulseNodeId: nodeId,
+        pulseNodeId: options?.pulseNodeId,
+        pulseColorIndex: options?.pulseColorIndex,
         sustainMs: options?.sustainMs,
         velocity: options?.velocity,
         humanize: options?.humanize,
@@ -3276,13 +3543,14 @@ function syncSelectionToNode(
         effectsOverride: nodeEffects,
       });
     }
-  } else if (match) {
+  } else if (!nodeMuted && match) {
     const chord = state.catalog.families[match.familyIndex]?.chords[match.chordIndex];
     if (chord) {
       const skipSound = !state.settings.alwaysPlayChords && performPlaying && updateSelection;
       if (!skipSound) {
         playChordPreview(chord, {
-          pulseNodeId: nodeId,
+          pulseNodeId: options?.pulseNodeId,
+          pulseColorIndex: options?.pulseColorIndex,
           sustainMs: options?.sustainMs,
           velocity: options?.velocity,
           humanize: options?.humanize,
@@ -3297,64 +3565,74 @@ function syncSelectionToNode(
 
   if (updateSelection) {
     saveGraph(updatedGraph);
+    const keepCatalogSelection = performPlaying;
+    store.setState({
+      ...state,
+      graph: updatedGraph,
+      selectedFamilyIndex: keepCatalogSelection
+        ? state.selectedFamilyIndex
+        : (match?.familyIndex ?? state.selectedFamilyIndex),
+      selectedChordIndex: keepCatalogSelection
+        ? state.selectedChordIndex
+        : (match?.chordIndex ?? state.selectedChordIndex),
+      // During perform playback, do not auto-expand/switch family fan.
+      chordFanVisible: keepCatalogSelection ? state.chordFanVisible : true,
+      status,
+    });
   }
-  const keepCatalogSelection = performPlaying || !updateSelection;
-  store.setState({
-    ...state,
-    graph: updatedGraph,
-    selectedFamilyIndex: keepCatalogSelection
-      ? state.selectedFamilyIndex
-      : (match?.familyIndex ?? state.selectedFamilyIndex),
-    selectedChordIndex: keepCatalogSelection
-      ? state.selectedChordIndex
-      : (match?.chordIndex ?? state.selectedChordIndex),
-    // During perform playback, do not auto-expand/switch family fan.
-    chordFanVisible: keepCatalogSelection ? state.chordFanVisible : true,
-    status,
-  });
 }
 
-function performStep(): void {
+function performStep(track: PerformTrackState): void {
   const state = store.getState();
   const graph = state.graph;
-  const isChordBoundary = performBeatWithinChord === 0;
-  if (performCursorNodeId === null || !graph.nodes[performCursorNodeId]) {
-    performCursorNodeId = graph.headId;
-  } else if (isChordBoundary && performStepCount > 0) {
-    performCursorNodeId = graph.nodes[performCursorNodeId]?.nextId ?? graph.headId;
+  const isChordBoundary = track.beatWithinChord === 0;
+  if (!graph.nodes[track.headId]) {
+    const fallbackHead = graphHeadIds(graph)[0];
+    if (fallbackHead === undefined) {
+      return;
+    }
+    track.headId = fallbackHead;
+  }
+  if (track.cursorNodeId === null || !graph.nodes[track.cursorNodeId]) {
+    track.cursorNodeId = track.headId;
+  } else if (isChordBoundary && track.stepCount > 0) {
+    track.cursorNodeId = graph.nodes[track.cursorNodeId]?.nextId ?? track.headId;
   }
 
-  if (performCursorNodeId === null) {
+  if (track.cursorNodeId === null) {
     return;
   }
 
-  const nodeBeatsPerChord = effectiveBeatsPerChordForNode(state, performCursorNodeId);
+  const nodeBeatsPerChord = effectiveBeatsPerChordForNode(state, track.cursorNodeId);
   // Sub-beat: every step is a chord boundary. Whole-beat: boundary every N beats.
   const stepsPerChord = nodeBeatsPerChord < 1 ? 1 : nodeBeatsPerChord;
-  performCurrentChordSteps = stepsPerChord;
+  track.currentChordSteps = stepsPerChord;
 
   if (isChordBoundary) {
-    const chordName = graph.nodes[performCursorNodeId]?.chordName ?? "state";
+    const chordName = graph.nodes[track.cursorNodeId]?.chordName ?? "state";
     const { bpm, accentStrength, humanizeAmount, layerWidth } = state.settings;
     const beatMs = 60000 / clamp(bpm, 40, 240);
     const sustainMs = nodeBeatsPerChord * beatMs * 0.92;
     const chordAccent = computeAccent(0, stepsPerChord, accentStrength);
     const humanizeDepth = clamp(humanizeAmount / 100, 0, 1);
-    syncSelectionToNode(performCursorNodeId, `Performing ${chordName}`, {
+    syncSelectionToNode(track.cursorNodeId, `Performing ${chordName}`, {
       updateSelection: false,
       sustainMs,
       velocity: chordAccent,
       humanize: true,
       humanizeAmount: humanizeDepth,
       layerWidth,
+      pulseNodeId: track.cursorNodeId,
+      pulseColorIndex: track.pulseColorIndex,
     });
-    const node = graph.nodes[performCursorNodeId];
+    const node = graph.nodes[track.cursorNodeId];
+    const nodeMuted = node?.muted === true;
     const bassPreset = node ? effectiveBassPresetForNode(state, node) : state.settings.bassPreset;
     const catalog = state.catalog;
     const customPlayback = node ? resolveNodeCustomPlaybackData(state, node) : null;
     const match = node && !customPlayback ? findChordInCatalog(catalog, node.chordName) : null;
     const chordEntry = match ? catalog.families[match.familyIndex]?.chords[match.chordIndex] : null;
-    if (chordEntry) {
+    if (!nodeMuted && chordEntry) {
       const bassNotes = computeBassNotes(chordEntry, bassPreset, 0, stepsPerChord);
       playBassNotes(bassNotes, beatMs, {
         velocity: chordAccent,
@@ -3362,7 +3640,7 @@ function performStep(): void {
         humanize: true,
         humanizeAmount: humanizeDepth,
       });
-    } else if (customPlayback && customPlayback.midiNotes.length > 0) {
+    } else if (!nodeMuted && customPlayback && customPlayback.midiNotes.length > 0) {
       const bassNotes = computeBassNotesFromRootMidi(customPlayback.midiNotes[0], bassPreset, 0, stepsPerChord);
       playBassNotes(bassNotes, beatMs, {
         velocity: chordAccent,
@@ -3375,13 +3653,14 @@ function performStep(): void {
     // On non-boundary beats, handle beat-aware bass patterns (oom-pah, stride).
     const { bpm, accentStrength, humanizeAmount } = state.settings;
     const beatMs = 60000 / clamp(bpm, 40, 240);
-    const beatWithinChord = performBeatWithinChord;
-    const node = performCursorNodeId !== null ? graph.nodes[performCursorNodeId] : null;
+    const beatWithinChord = track.beatWithinChord;
+    const node = track.cursorNodeId !== null ? graph.nodes[track.cursorNodeId] : null;
+    const nodeMuted = node?.muted === true;
     const bassPreset = node ? effectiveBassPresetForNode(state, node) : state.settings.bassPreset;
     const customPlayback = node ? resolveNodeCustomPlaybackData(state, node) : null;
     const match = node && !customPlayback ? findChordInCatalog(state.catalog, node.chordName) : null;
     const chordEntry = match ? state.catalog.families[match.familyIndex]?.chords[match.chordIndex] : null;
-    if (chordEntry) {
+    if (!nodeMuted && chordEntry) {
       const bassNotes = computeBassNotes(chordEntry, bassPreset, beatWithinChord, stepsPerChord);
       const beatAccent = computeAccent(beatWithinChord, stepsPerChord, accentStrength);
       const humanizeDepth = clamp(humanizeAmount / 100, 0, 1);
@@ -3391,7 +3670,7 @@ function performStep(): void {
         humanize: true,
         humanizeAmount: humanizeDepth,
       });
-    } else if (customPlayback && customPlayback.midiNotes.length > 0) {
+    } else if (!nodeMuted && customPlayback && customPlayback.midiNotes.length > 0) {
       const bassNotes = computeBassNotesFromRootMidi(customPlayback.midiNotes[0], bassPreset, beatWithinChord, stepsPerChord);
       const beatAccent = computeAccent(beatWithinChord, stepsPerChord, accentStrength);
       const humanizeDepth = clamp(humanizeAmount / 100, 0, 1);
@@ -3404,25 +3683,37 @@ function performStep(): void {
     }
   }
 
-  if (performBeatWithinChord + 1 >= performCurrentChordSteps) {
-    performBeatWithinChord = 0;
+  if (track.beatWithinChord + 1 >= track.currentChordSteps) {
+    track.beatWithinChord = 0;
   } else {
-    performBeatWithinChord += 1;
+    track.beatWithinChord += 1;
   }
 }
 
 function startPerformLoop(options?: { resetCursor?: boolean }): void {
   const resetCursor = options?.resetCursor ?? true;
+  const previousTracks = { ...performTracks };
   stopPerformLoop();
-  performPlaying = true;
-  performStepCount = 0;
-  performBeatWithinChord = 0;
-  performCurrentChordSteps = 1;
-  if (resetCursor) {
-    performCursorNodeId = null;
+  const state = store.getState();
+  const headIds = graphHeadIds(state.graph);
+  if (headIds.length === 0) {
+    return;
   }
-  performStep();
-  scheduleNextPerformStep();
+  performPlaying = true;
+  headIds.forEach((headId, headIndex) => {
+    const track: PerformTrackState = {
+      headId,
+      pulseColorIndex: headIndex,
+      cursorNodeId: resetCursor ? null : (previousTracks[headId]?.cursorNodeId ?? null),
+      stepCount: 0,
+      beatWithinChord: 0,
+      currentChordSteps: 1,
+      timerId: null,
+    };
+    performTracks[headId] = track;
+    performStep(track);
+    scheduleNextPerformStep(track);
+  });
 }
 
 function handleModalOpened(): void {
@@ -3580,6 +3871,7 @@ function buildHitZones(layout: StageLayout, geometry: SceneGeometry, state: AppS
   const showRemoveAction = selectedNodeAllowsAction(state, "remove-selected");
   const showCenterCycle = selectedNodeAllowsAction(state, "cycle-selection");
   const nodeViews = buildGraphNodeViews(state, layout);
+  const initialNodeIds = new Set(graphHeadIds(state.graph));
   const selectedView = nodeViews.find((view) => view.isSelected);
   const activeCenterX = selectedView?.x ?? layout.centerX;
   const activeCenterY = selectedView?.y ?? layout.centerY;
@@ -3708,6 +4000,7 @@ function drawFallback2d(
   }
 
   const nodeViews = buildGraphNodeViews(state, layout);
+  const initialNodeIds = new Set(graphHeadIds(state.graph));
   const selectedView = nodeViews.find((view) => view.isSelected);
   const activeCenterX = selectedView?.x ?? layout.centerX;
   const activeCenterY = selectedView?.y ?? layout.centerY;
@@ -3746,7 +4039,7 @@ function drawFallback2d(
   ctx.lineWidth = 3;
   ctx.stroke();
 
-  if (state.graph.headId === state.graph.selectedNodeId) {
+  if (initialNodeIds.has(state.graph.selectedNodeId)) {
     ctx.beginPath();
     ctx.arc(activeCenterX, activeCenterY, layout.familyInner, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(255, 178, 60, 0.92)";
@@ -3754,22 +4047,29 @@ function drawFallback2d(
     ctx.stroke();
   }
 
-  const pulseStrength = pulseStrengthAt(performance.now());
-  if (pulseStrength > 0.001) {
-    const pulseNodeView = centerPulseNodeId !== null
-      ? findGraphNodeViewById(nodeViews, centerPulseNodeId)
+  const pulseNow = performance.now();
+  activeNodePulses = activeNodePulses.filter((pulse) => pulseStrengthForStart(pulse.startMs, pulseNow) > 0.001);
+  activeNodePulses.forEach((pulse) => {
+    const pulseStrength = pulseStrengthForStart(pulse.startMs, pulseNow);
+    if (pulseStrength <= 0.001) {
+      return;
+    }
+    const pulseNodeView = pulse.nodeId !== null
+      ? findGraphNodeViewById(nodeViews, pulse.nodeId)
       : null;
     const pulseCenterX = pulseNodeView?.x ?? activeCenterX;
     const pulseCenterY = pulseNodeView?.y ?? activeCenterY;
+    const color = PULSE_COLOR_PALETTE[Math.abs(pulse.colorIndex) % PULSE_COLOR_PALETTE.length] ?? "132, 236, 255";
+
     ctx.beginPath();
-    ctx.arc(pulseCenterX, pulseCenterY, layout.centerRadius + pulseStrength * 4, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(126, 231, 255, ${0.22 + pulseStrength * 0.7})`;
+    ctx.arc(pulseCenterX, pulseCenterY, layout.centerRadius + pulseStrength * 4.4, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${color}, ${0.24 + pulseStrength * 0.7})`;
     ctx.lineWidth = 3 + pulseStrength * 8;
-    ctx.shadowColor = "rgba(128, 238, 255, 0.95)";
+    ctx.shadowColor = `rgba(${color}, 0.95)`;
     ctx.shadowBlur = 8 + pulseStrength * 26;
     ctx.stroke();
     ctx.shadowBlur = 0;
-  }
+  });
 
   const showAddAction = selectedNodeAllowsAction(state, "add-after");
   const showRemoveAction = selectedNodeAllowsAction(state, "remove-selected");
@@ -3804,7 +4104,7 @@ function drawFallback2d(
       return;
     }
 
-    const isReturnToHead = node.nextId === state.graph.headId;
+    const isReturnToHead = initialNodeIds.has(node.nextId);
     const fromStyle = graphNodeTypeConfig(from.type).renderStyle;
 
     const dx = to.x - from.x;
@@ -4005,7 +4305,7 @@ function drawFallback2d(
     ctx.fillText("+", nodeAddX, nodeAddY + 0.5);
     ctx.fillText("-", nodeRemoveX, nodeRemoveY + 0.5);
 
-    const isHead = view.nodeId === state.graph.headId;
+    const isHead = initialNodeIds.has(view.nodeId);
     const viewStyle = graphNodeTypeConfig(view.type).renderStyle;
     ctx.beginPath();
     ctx.arc(view.x, view.y, layout.centerRadius * nodeScale, 0, Math.PI * 2);
@@ -4102,6 +4402,9 @@ function selectChord(index: number): void {
     graph: updatedGraph,
     status: `Focused chord ${chosen?.full_name ?? chosen?.numeral ?? ""} on node ${updatedGraph.selectedNodeId}`,
   });
+  if (chosen?.full_name) {
+    appendDebugLog(`[ui] edit node id=${updatedGraph.selectedNodeId} chord="${chosen.full_name}"`);
+  }
 }
 
 function addNode(): void {
@@ -4137,6 +4440,64 @@ function addNode(): void {
   const canvas = root.querySelector<HTMLCanvasElement>(".webgl-stage");
   if (canvas) {
     panTowardsNode(canvas, insertedNodeId);
+    redrawCanvasOnly(canvas);
+  }
+}
+
+function addInitialNode(): void {
+  const state = store.getState();
+  const sourceNode = state.graph.nodes[state.graph.selectedNodeId];
+  const chordName = sourceNode?.chordName ?? getSelectedChord(state).full_name;
+  const nodeId = state.graph.nextNodeId;
+  const nextNode: GraphNode = {
+    id: nodeId,
+    type: "chord-selection",
+    chordName,
+    beatsPerChordOverride: sourceNode?.beatsPerChordOverride ?? null,
+    muted: sourceNode?.muted === true,
+    waveformOverride: sourceNode?.waveformOverride ?? null,
+    effectsOverride: sourceNode?.effectsOverride ?? null,
+    bassPresetOverride: sourceNode?.bassPresetOverride ?? null,
+    customChordEnabled: sourceNode?.customChordEnabled === true,
+    customChordInputKind: sourceNode?.customChordInputKind === "midi" ? "midi" : "tones",
+    customChordRawInput: sourceNode?.customChordRawInput ?? "",
+    customChordTransposeWithCentralTone: sourceNode?.customChordTransposeWithCentralTone === true,
+    nextId: nodeId,
+  };
+
+  const graph = normalizeGraphHeads({
+    ...state.graph,
+    selectedNodeId: nodeId,
+    nextNodeId: nodeId + 1,
+    headIds: [...graphHeadIds(state.graph), nodeId],
+    nodes: {
+      ...state.graph.nodes,
+      [nodeId]: nextNode,
+    },
+  });
+
+  const prevOffset = nodeOffsets[state.graph.selectedNodeId] ?? { x: 0, y: 0 };
+  nodeOffsets[nodeId] = {
+    x: prevOffset.x + (Math.random() - 0.5) * 160,
+    y: prevOffset.y + (Math.random() - 0.5) * 160,
+  };
+  nodeVelocities[nodeId] = { vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4 };
+
+  saveGraph(graph);
+
+  store.setState({
+    ...state,
+    graph,
+    chordFanVisible: true,
+    status: `Added initial state ${chordName}`,
+  });
+  appendDebugLog(
+    `[ui] add initial node id=${nodeId} chord="${chordName}" totalInitial=${graphHeadIds(graph).length}`,
+  );
+
+  const canvas = root.querySelector<HTMLCanvasElement>(".webgl-stage");
+  if (canvas) {
+    panTowardsNode(canvas, nodeId);
     redrawCanvasOnly(canvas);
   }
 }
@@ -4198,7 +4559,6 @@ function resetCurrentStateToInitialNode(): void {
   }
 
   stopPerformLoop();
-  performCursorNodeId = null;
 
   const initialChord = initialChordName(state.catalog);
   const nextLoopName = nextGeneratedLoopName(state.savedLoops);
@@ -4243,7 +4603,7 @@ function buildSavedLoopRecord(state: AppState, id: string, name: string): SavedL
   return {
     id,
     name,
-    graph: cloneGraph(state.graph),
+    graph: normalizeGraphHeads(cloneGraph(state.graph)),
     selectedFamilyIndex: state.selectedFamilyIndex,
     selectedChordIndex: state.selectedChordIndex,
     chordFanVisible: state.chordFanVisible,
@@ -4336,7 +4696,6 @@ function loadSavedLoopState(loopId: string): void {
   }
 
   stopPerformLoop();
-  performCursorNodeId = null;
 
   const settings: AppSettings = {
     ...state.settings,
@@ -4347,7 +4706,7 @@ function loadSavedLoopState(loopId: string): void {
     midiPorts: state.settings.midiPorts,
   };
   const catalog = transposeCatalogForCentralTone(CATALOG_TEMPLATE, settings.centralTone);
-  const graph = cloneGraph(loop.graph);
+  const graph = sanitizeLoopGraph(cloneGraph(loop.graph)) ?? createInitialGraph(initialChordName(catalog));
   for (const key of Object.keys(nodeOffsets)) {
     delete nodeOffsets[Number(key)];
   }
@@ -4401,13 +4760,18 @@ function loadSavedLoopState(loopId: string): void {
   appendDebugLog(`[ui] loaded loop id=${loop.id} name="${loop.name}"`);
 }
 
-function redrawCanvasOnly(canvas: HTMLCanvasElement): void {
+function redrawCanvasOnly(canvas: HTMLCanvasElement, options?: { preserveOverlay?: boolean }): void {
   const state = store.getState();
   const rect = canvas.getBoundingClientRect();
   const layout = buildLayout(rect.width, rect.height);
   const geometry = buildSceneGeometry(state, layout);
   hitZones = buildHitZones(layout, geometry, state);
   drawFallback2d(canvas, layout, geometry, state);
+
+  const preserveOverlay = options?.preserveOverlay ?? state.settings.showNodeTimingPanel;
+  if (preserveOverlay) {
+    return;
+  }
 
   const overlayEl = root.querySelector<HTMLElement>(".overlay");
   if (overlayEl) {
@@ -4417,10 +4781,15 @@ function redrawCanvasOnly(canvas: HTMLCanvasElement): void {
 }
 
 function bindCornerControls(shell: HTMLElement): void {
+  const addInitialBtn = shell.querySelector<HTMLButtonElement>(".corner-btn[data-action='add-initial']");
   const settingsBtn = shell.querySelector<HTMLButtonElement>(".corner-btn[data-action='settings']");
   const savedLoopsBtn = shell.querySelector<HTMLButtonElement>(".corner-btn[data-action='saved-loops']");
   const performBtn = shell.querySelector<HTMLButtonElement>(".corner-btn[data-action='perform']");
   const centralToneBadge = shell.querySelector<HTMLElement>(".central-tone-badge");
+
+  addInitialBtn?.addEventListener("click", () => {
+    addInitialNode();
+  });
 
   const focusSelectedChordInRing = () => {
     const state = store.getState();
@@ -4855,6 +5224,21 @@ function bindNodeTimingPanel(shell: HTMLElement): void {
       customChordInputKind: parsed?.kind ?? node.customChordInputKind,
       customChordTransposeWithCentralTone: node.customChordTransposeWithCentralTone === true,
     }), enabled ? "Custom chord enabled for node" : "Catalog chord restored for node");
+    appendDebugLog(`[ui] edit node id=${nodeId} customSource=${enabled ? "custom" : "catalog"}`);
+  });
+
+  const mutedToggle = shell.querySelector<HTMLInputElement>("input[data-node-timing-setting='muted']");
+  mutedToggle?.addEventListener("change", () => {
+    const state = store.getState();
+    const nodeId = state.nodeTimingModalNodeId;
+    if (nodeId === null) {
+      return;
+    }
+    updateNode(nodeId, (node) => ({
+      ...node,
+      muted: mutedToggle.checked,
+    }), mutedToggle.checked ? "Node muted" : "Node unmuted");
+    appendDebugLog(`[ui] edit node id=${nodeId} muted=${mutedToggle.checked}`);
   });
 
   const transposeToggle = shell.querySelector<HTMLInputElement>("input[data-node-timing-setting='custom-transpose']");
@@ -4868,6 +5252,7 @@ function bindNodeTimingPanel(shell: HTMLElement): void {
       ...node,
       customChordTransposeWithCentralTone: transposeToggle.checked,
     }), transposeToggle.checked ? "Custom chord transpose enabled" : "Custom chord transpose disabled");
+    appendDebugLog(`[ui] edit node id=${nodeId} customTranspose=${transposeToggle.checked}`);
   });
 
   const waveformSelect = shell.querySelector<HTMLSelectElement>("select[data-node-timing-setting='waveform-override']");
@@ -4882,6 +5267,7 @@ function bindNodeTimingPanel(shell: HTMLElement): void {
       ...node,
       waveformOverride: override,
     }), override === null ? "Node waveform now inherits global setting" : `Node waveform set to ${override}`);
+    appendDebugLog(`[ui] edit node id=${nodeId} waveform=${override ?? "inherit"}`);
   });
 
   const effectsSelect = shell.querySelector<HTMLSelectElement>("select[data-node-timing-setting='effects-override']");
@@ -4896,6 +5282,7 @@ function bindNodeTimingPanel(shell: HTMLElement): void {
       ...node,
       effectsOverride: override,
     }), override === null ? "Node effects now inherit global setting" : `Node effects set to ${override}`);
+    appendDebugLog(`[ui] edit node id=${nodeId} effects=${override ?? "inherit"}`);
   });
 
   const bassSelect = shell.querySelector<HTMLSelectElement>("select[data-node-timing-setting='bass-override']");
@@ -4910,6 +5297,7 @@ function bindNodeTimingPanel(shell: HTMLElement): void {
       ...node,
       bassPresetOverride: override,
     }), override === null ? "Node bass now inherits global setting" : `Node bass set to ${BASS_PRESET_LABELS[override]}`);
+    appendDebugLog(`[ui] edit node id=${nodeId} bass=${override ?? "inherit"}`);
   });
 
   const customInput = shell.querySelector<HTMLInputElement>("input[data-node-timing-input='custom-chord']");
@@ -4950,6 +5338,7 @@ function bindNodeTimingPanel(shell: HTMLElement): void {
       customChordInputKind: parsedDraft.kind,
     }), `Custom chord ready: ${parsedDraft.tonesText}`
     );
+    appendDebugLog(`[ui] edit node id=${nodeId} customChord="${parsedDraft.tonesText}"`);
   });
 
   customInput?.addEventListener("focus", () => {
@@ -4987,17 +5376,14 @@ function bindNodeTimingPanel(shell: HTMLElement): void {
     if (!node) {
       return;
     }
-    const graph = {
-      ...state.graph,
-      headId: nodeId,
-    };
+    const graph = setNodeAsGraphHead(state.graph, nodeId);
     saveGraph(graph);
     store.setState({
       ...state,
       graph,
       status: `Set ${node.chordName} as initial state`,
     });
-    appendDebugLog(`[ui] set head id=${nodeId} chord="${node.chordName}" (modal)`);
+    appendDebugLog(`[ui] set initial id=${nodeId} chord="${node.chordName}" (modal)`);
   });
 
   const timingSelect = shell.querySelector<HTMLSelectElement>("select[data-node-timing-setting='beats-override']");
@@ -5047,6 +5433,13 @@ function bindNodeTimingPanel(shell: HTMLElement): void {
     }
     const node = state.graph.nodes[nodeId];
     if (!node) {
+      return;
+    }
+    if (node.muted === true) {
+      store.setState({
+        ...state,
+        status: "Node is muted",
+      });
       return;
     }
     const nodeWaveform = effectiveWaveformForNode(state, node);
@@ -5507,7 +5900,7 @@ function render(): void {
   // innerHTML re-render to preserve open <select> dropdowns and focused inputs.
   if (canUseModalFastPath) {
     const canvas = root.querySelector<HTMLCanvasElement>(".webgl-stage");
-    if (canvas) redrawCanvasOnly(canvas);
+    if (canvas) redrawCanvasOnly(canvas, { preserveOverlay: true });
     const performBtn = root.querySelector<HTMLButtonElement>(".corner-btn.perform");
     if (performBtn) {
       performBtn.textContent = performPlaying ? "❚❚" : "▶";
@@ -5550,6 +5943,7 @@ function render(): void {
       const activeNodeId = state.nodeTimingModalNodeId ?? state.graph.selectedNodeId;
       const activeNode = state.graph.nodes[activeNodeId] ?? null;
       if (activeNode) {
+        const customEnabled = activeNode.customChordEnabled === true;
         const customInputValue = nodeTimingDraftInputValue(state, activeNode);
         const parsedCustom = parseNodeCustomChord(
           {
@@ -5564,6 +5958,28 @@ function render(): void {
         const previewEl = root.querySelector<HTMLElement>("[data-node-timing-custom-preview]");
         if (previewEl) {
           previewEl.textContent = previewText;
+        }
+
+        const sourceSelect = root.querySelector<HTMLSelectElement>("select[data-node-timing-setting='chord-source']");
+        if (sourceSelect) {
+          const nextSourceValue = customEnabled ? "custom" : "catalog";
+          if (sourceSelect.value !== nextSourceValue) {
+            sourceSelect.value = nextSourceValue;
+          }
+        }
+
+        const customInput = root.querySelector<HTMLInputElement>("input[data-node-timing-input='custom-chord']");
+        if (customInput) {
+          customInput.disabled = !customEnabled;
+          if (document.activeElement !== customInput && customInput.value !== customInputValue) {
+            customInput.value = customInputValue;
+          }
+        }
+
+        const transposeToggle = root.querySelector<HTMLInputElement>("input[data-node-timing-setting='custom-transpose']");
+        if (transposeToggle) {
+          transposeToggle.disabled = !customEnabled;
+          transposeToggle.checked = activeNode.customChordTransposeWithCentralTone === true;
         }
 
         const effectiveSoundEl = root.querySelector<HTMLElement>("[data-node-timing-effective-sound]");
