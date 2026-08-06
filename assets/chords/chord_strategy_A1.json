@@ -1,0 +1,516 @@
+{
+  "families": [
+    {
+      "name": "Major",
+      "chords": [
+        {
+          "numeral": "I",
+          "full_name": "C",
+          "intervals": [
+            1,
+            5,
+            8
+          ],
+          "root": null
+        },
+        {
+          "numeral": "ii",
+          "full_name": "Dm",
+          "intervals": [
+            1,
+            4,
+            8
+          ],
+          "root": "D"
+        },
+        {
+          "numeral": "iii",
+          "full_name": "Em",
+          "intervals": [
+            1,
+            4,
+            8
+          ],
+          "root": "E"
+        },
+        {
+          "numeral": "IV",
+          "full_name": "F",
+          "intervals": [
+            1,
+            5,
+            8
+          ],
+          "root": "F"
+        },
+        {
+          "numeral": "V",
+          "full_name": "G",
+          "intervals": [
+            1,
+            5,
+            8
+          ],
+          "root": "G"
+        },
+        {
+          "numeral": "vi",
+          "full_name": "Am",
+          "intervals": [
+            1,
+            4,
+            8
+          ],
+          "root": "A"
+        },
+        {
+          "numeral": "vii",
+          "full_name": "Bdim",
+          "intervals": [
+            1,
+            4,
+            7
+          ],
+          "root": "B"
+        }
+      ]
+    },
+    {
+      "name": "V/V",
+      "chords": [
+        {
+          "numeral": "V/ii",
+          "full_name": "A7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "A"
+        },
+        {
+          "numeral": "V/iii",
+          "full_name": "B7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "B"
+        },
+        {
+          "numeral": "V/IV",
+          "full_name": "C7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "C"
+        },
+        {
+          "numeral": "V/V",
+          "full_name": "D7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "D"
+        },
+        {
+          "numeral": "V/vi",
+          "full_name": "E7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "E"
+        },
+        {
+          "numeral": "V/vii",
+          "full_name": "F#7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "F#"
+        }
+      ]
+    },
+    {
+      "name": "V/V/V",
+      "chords": [
+        {
+          "numeral": "II7",
+          "full_name": "D7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "D"
+        },
+        {
+          "numeral": "ii7",
+          "full_name": "Dm7",
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
+          "root": "D"
+        },
+        {
+          "numeral": "III7",
+          "full_name": "E7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "E"
+        },
+        {
+          "numeral": "iii7",
+          "full_name": "Em7",
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
+          "root": "E"
+        },
+        {
+          "numeral": "#IV7",
+          "full_name": "F#7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "F#"
+        },
+        {
+          "numeral": "V/vii",
+          "full_name": "F#m7",
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
+          "root": "F#"
+        },
+        {
+          "numeral": "V7",
+          "full_name": "G7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "G"
+        },
+        {
+          "numeral": "v7",
+          "full_name": "Gm7",
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
+          "root": "G"
+        },
+        {
+          "numeral": "VI7",
+          "full_name": "A7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "A"
+        },
+        {
+          "numeral": "vi7",
+          "full_name": "Am7",
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
+          "root": "A"
+        },
+        {
+          "numeral": "viidim",
+          "full_name": "Bdim",
+          "intervals": [
+            1,
+            4,
+            7
+          ],
+          "root": "B"
+        },
+        {
+          "numeral": "VII7",
+          "full_name": "B7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "B"
+        },
+        {
+          "numeral": "vii7",
+          "full_name": "Bm7",
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
+          "root": "B"
+        }
+      ]
+    },
+    {
+      "name": "Borrowed",
+      "chords": [
+        {
+          "numeral": "i",
+          "full_name": "Cm",
+          "intervals": [
+            1,
+            4,
+            8
+          ],
+          "root": "C"
+        },
+        {
+          "numeral": "iidim",
+          "full_name": "Ddim",
+          "intervals": [
+            1,
+            4,
+            7
+          ],
+          "root": "D"
+        },
+        {
+          "numeral": "bIII",
+          "full_name": "Ebmaj7",
+          "intervals": [
+            1,
+            5,
+            8,
+            12
+          ],
+          "root": "Eb"
+        },
+        {
+          "numeral": "IV",
+          "full_name": "Fm7",
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
+          "root": "F"
+        },
+        {
+          "numeral": "V",
+          "full_name": "Gm7",
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
+          "root": "G"
+        },
+        {
+          "numeral": "bVI",
+          "full_name": "Abmaj7",
+          "intervals": [
+            1,
+            5,
+            8,
+            12
+          ],
+          "root": "Ab"
+        },
+        {
+          "numeral": "bVII",
+          "full_name": "Bb7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "Bb"
+        }
+      ]
+    },
+    {
+      "name": "Intersects",
+      "chords": [
+        {
+          "numeral": "bVII7",
+          "full_name": "Bbmaj7",
+          "intervals": [
+            1,
+            5,
+            8,
+            12
+          ],
+          "root": "Bb"
+        },
+        {
+          "numeral": "VII7",
+          "full_name": "B7",
+          "intervals": [
+            1,
+            5,
+            8,
+            11
+          ],
+          "root": "B"
+        },
+        {
+          "numeral": "vii7",
+          "full_name": "Bm7",
+          "intervals": [
+            1,
+            4,
+            8,
+            11
+          ],
+          "root": "B"
+        },
+        {
+          "numeral": "VIIdim7",
+          "full_name": "Bdim7",
+          "intervals": [
+            1,
+            4,
+            7,
+            11
+          ],
+          "root": "B"
+        },
+        {
+          "numeral": "VIImaj7",
+          "full_name": "Bsus7",
+          "intervals": [
+            1,
+            6,
+            8,
+            11
+          ],
+          "root": "B"
+        },
+        {
+          "numeral": "I6",
+          "full_name": "C6",
+          "intervals": [
+            1,
+            5,
+            8,
+            10
+          ],
+          "root": "C"
+        },
+        {
+          "numeral": "i6",
+          "full_name": "Cm6",
+          "intervals": [
+            1,
+            4,
+            8,
+            10
+          ],
+          "root": "C"
+        },
+        {
+          "numeral": "V9",
+          "full_name": "Gadd9",
+          "intervals": [
+            1,
+            3,
+            5,
+            8
+          ],
+          "root": "G"
+        },
+        {
+          "numeral": "V79",
+          "full_name": "G7add9",
+          "intervals": [
+            1,
+            3,
+            5,
+            8,
+            12
+          ],
+          "root": "G"
+        },
+        {
+          "numeral": "v9",
+          "full_name": "Gmadd9",
+          "intervals": [
+            1,
+            3,
+            4,
+            8
+          ],
+          "root": "G"
+        }
+      ]
+    },
+    {
+      "name": "User Defined",
+      "chords": [
+        {
+          "full_name": "C",
+          "tones": [
+            "C",
+            "E",
+            "G"
+          ]
+        },
+        {
+          "full_name": "Ci1",
+          "tones": [
+            "E",
+            "G",
+            "C",
+            "E",
+            "E"
+          ]
+        }
+      ]
+    }
+  ]
+}
