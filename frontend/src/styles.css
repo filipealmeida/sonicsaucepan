@@ -647,6 +647,13 @@ body {
   background: rgba(18, 53, 92, 0.88);
 }
 
+.node-timing-info strong {
+  color: rgba(255, 224, 171, 0.96);
+  font-size: 0.86rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 @media (max-width: 820px) {
   .central-tone-badge {
     top: 10px;

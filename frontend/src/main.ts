@@ -48,6 +48,7 @@ type GraphNode = {
   id: number;
   type: GraphNodeType;
   chordName: string;
+  beatsPerChordOverride?: number | null;
   nextId: number;
 };
 
@@ -94,6 +95,7 @@ type AppState = {
   selectedChordIndex: number;
   chordFanVisible: boolean;
   showSelectedRomanNumeral: boolean;
+  nodeTimingModalNodeId: number | null;
   graph: LoopGraph;
   settings: AppSettings;
   savedLoops: SavedLoopRecord[];
@@ -122,6 +124,7 @@ type AppSettings = {
   showPanel: boolean;
   showPerformPanel: boolean;
   showSavedLoopsPanel: boolean;
+  showNodeTimingPanel: boolean;
   debugFooterEnabled: boolean;
   alwaysPlayChords: boolean;
   centralTone: string;
@@ -365,7 +368,7 @@ function createInitialGraph(initialChord: string): LoopGraph {
     selectedNodeId: 0,
     nextNodeId: 1,
     nodes: {
-      0: { id: 0, type: "chord-selection", chordName: initialChord, nextId: 0 },
+      0: { id: 0, type: "chord-selection", chordName: initialChord, beatsPerChordOverride: null, nextId: 0 },
     },
   };
 }
@@ -452,6 +455,7 @@ function addAfterSelected(graph: LoopGraph, chordName: string): LoopGraph {
         id: newId,
         type: selected.type,
         chordName,
+        beatsPerChordOverride: selected.beatsPerChordOverride ?? null,
         nextId: selected.nextId,
       },
     },
@@ -633,10 +637,22 @@ function loadSavedGraph(): LoopGraph | null {
     const nextNodeId = typeof parsed.nextNodeId === "number"
       ? parsed.nextNodeId
       : (Math.max(...Object.keys(parsed.nodes).map((value) => Number(value))) + 1);
+    const normalizedNodes: Record<number, GraphNode> = {};
+    for (const [nodeIdText, node] of Object.entries(parsed.nodes)) {
+      const nodeId = Number(nodeIdText);
+      if (!Number.isFinite(nodeId)) {
+        continue;
+      }
+      normalizedNodes[nodeId] = {
+        ...node,
+        beatsPerChordOverride: normalizeNodeBeatsOverride(node.beatsPerChordOverride),
+      };
+    }
     return {
       ...parsed,
       selectedNodeId,
       nextNodeId,
+      nodes: normalizedNodes,
     };
   } catch {
     return null;
@@ -830,6 +846,7 @@ function defaultSettings(): AppSettings {
     showPanel: false,
     showPerformPanel: false,
     showSavedLoopsPanel: false,
+    showNodeTimingPanel: false,
     debugFooterEnabled: false,
     alwaysPlayChords: true,
     centralTone: "C",
@@ -891,12 +908,34 @@ function normalizeLayerWidth(value: unknown): number {
 
 const BEATS_PER_CHORD_OPTIONS = [0.125, 0.25, 0.5, 1, 2, 3, 4, 8] as const;
 
+function bpcLabel(v: number): string {
+  return v < 1 ? `${v === 0.125 ? "1/8" : v === 0.25 ? "1/4" : "1/2"} beat` : `${v} beat${v === 1 ? "" : "s"}`;
+}
+
 function normalizeBeatsPerChord(value: unknown): number {
   const n = Number(value);
   if (!Number.isFinite(n)) return 4;
   return [...BEATS_PER_CHORD_OPTIONS].reduce((best, opt) =>
     Math.abs(opt - n) < Math.abs(best - n) ? opt : best
   );
+}
+
+function normalizeNodeBeatsOverride(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  return normalizeBeatsPerChord(value);
+}
+
+function effectiveBeatsPerChordForNode(state: AppState, nodeId: number | null): number {
+  if (nodeId === null) {
+    return normalizeBeatsPerChord(state.settings.beatsPerChord);
+  }
+  const node = state.graph.nodes[nodeId];
+  if (!node) {
+    return normalizeBeatsPerChord(state.settings.beatsPerChord);
+  }
+  return normalizeBeatsPerChord(node.beatsPerChordOverride ?? state.settings.beatsPerChord);
 }
 
 function normalizeCentralTone(value: unknown): string {
@@ -1078,6 +1117,7 @@ function loadSettings(): AppSettings {
       showPanel: false,
       showPerformPanel: false,
       showSavedLoopsPanel: false,
+      showNodeTimingPanel: false,
     };
   } catch {
     return defaults;
@@ -1674,6 +1714,7 @@ const store = createStore<AppState>(() => ({
   selectedChordIndex: initialSelectedChordIndex,
   chordFanVisible: persistedInteraction.chordFanVisible === true,
   showSelectedRomanNumeral: false,
+  nodeTimingModalNodeId: null,
   graph: startingGraph,
   settings: initialSettings,
   savedLoops: initialSavedLoops,
@@ -2314,6 +2355,7 @@ function overlay(rootEl: HTMLElement, state: AppState, layout: StageLayout, geom
       ${buildDebugFooter(state)}
       ${buildSettingsPanel(state)}
       ${buildPerformPanel(state)}
+      ${buildNodeTimingPanel(state)}
       ${buildSavedLoopsPanel(state)}
     </div>
   `;
@@ -2410,7 +2452,6 @@ function buildPerformPanel(state: AppState): string {
   const timeSignatureOptions = TIME_SIGNATURES
     .map((signature) => `<option value="${signature}" ${signature === settings.timeSignature ? "selected" : ""}>${escapeHtml(signature)}</option>`)
     .join("");
-  const bpcLabel = (v: number) => v < 1 ? `${v === 0.125 ? "1/8" : v === 0.25 ? "1/4" : "1/2"} beat` : `${v} beat${v === 1 ? "" : "s"}`;
   const beatsPerChordOptions = BEATS_PER_CHORD_OPTIONS
     .map((v) => `<option value="${v}" ${v === settings.beatsPerChord ? "selected" : ""}>${escapeHtml(bpcLabel(v))}</option>`)
     .join("");
@@ -2474,6 +2515,61 @@ function buildPerformPanel(state: AppState): string {
             <span>Bass</span>
             <select data-perform-setting="bass-preset">${bassPresetOptions}</select>
           </label>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function buildNodeTimingPanel(state: AppState): string {
+  const settings = state.settings;
+  const sequence = graphSequence(state.graph);
+  const activeNodeId = state.nodeTimingModalNodeId ?? state.graph.selectedNodeId;
+  const activeNode = state.graph.nodes[activeNodeId] ?? null;
+  const nodeOptions = sequence
+    .map((node, index) => {
+      const label = `${index + 1}. ${node.chordName}${node.id === state.graph.headId ? " (Initial)" : ""}`;
+      return `<option value="${node.id}" ${node.id === activeNodeId ? "selected" : ""}>${escapeHtml(label)}</option>`;
+    })
+    .join("");
+  const overrideOptions = BEATS_PER_CHORD_OPTIONS
+    .map((value) => `<option value="${value}" ${activeNode?.beatsPerChordOverride === value ? "selected" : ""}>${escapeHtml(bpcLabel(value))}</option>`)
+    .join("");
+  const effective = activeNode
+    ? bpcLabel(effectiveBeatsPerChordForNode(state, activeNode.id))
+    : bpcLabel(normalizeBeatsPerChord(state.settings.beatsPerChord));
+  const headNode = state.graph.nodes[state.graph.headId] ?? null;
+  const isActiveNodeHead = activeNode?.id === state.graph.headId;
+
+  return `
+    <div class="settings-modal node-timing-modal ${settings.showNodeTimingPanel ? "open" : ""}" aria-hidden="${settings.showNodeTimingPanel ? "false" : "true"}">
+      <button class="settings-backdrop" data-node-timing-action="close" aria-label="Close node timing options"></button>
+      <section class="settings-panel" role="dialog" aria-modal="true" tabindex="-1" aria-label="Node timing options">
+        <header class="settings-header">
+          <h2>Node Timing</h2>
+          <button class="settings-close" data-node-timing-action="close" aria-label="Close node timing options">×</button>
+        </header>
+        <div class="settings-fields">
+          <label class="settings-field">
+            <span>Editing Node</span>
+            <select data-node-timing-setting="node-id">${nodeOptions}</select>
+          </label>
+          <label class="settings-field">
+            <span>Timing Preset</span>
+            <select data-node-timing-setting="beats-override">
+              <option value="inherit" ${(activeNode?.beatsPerChordOverride ?? null) === null ? "selected" : ""}>Inherit Global (${escapeHtml(bpcLabel(state.settings.beatsPerChord))})</option>
+              ${overrideOptions}
+            </select>
+          </label>
+          <div class="settings-field inline node-timing-info">
+            <span>Effective For Node</span>
+            <strong>${escapeHtml(effective)}</strong>
+          </div>
+          <div class="settings-field inline node-timing-info">
+            <span>Current Initial State</span>
+            <strong>${escapeHtml(headNode?.chordName ?? "node")}</strong>
+          </div>
+          <button class="saved-loop-save-btn node-timing-head-btn" data-node-timing-action="make-head" type="button" ${isActiveNodeHead ? "disabled" : ""}>${isActiveNodeHead ? "Already Initial State" : "Make This Node Initial State"}</button>
         </div>
       </section>
     </div>
@@ -2624,6 +2720,8 @@ let performPlaying = false;
 let performTimerId: number | null = null;
 let performCursorNodeId: number | null = null;
 let performStepCount = 0;
+let performBeatWithinChord = 0;
+let performCurrentChordSteps = 1;
 let modalOpenCount = 0;
 let resumePerformAfterModalClose = false;
 let debugFooterDraft = "";
@@ -2767,9 +2865,10 @@ function stopPerformLoop(): void {
   performPlaying = false;
 }
 
-function currentPerformStepMs(stepCount: number): number {
-  const { bpm, swing, beatsPerChord } = store.getState().settings;
-  const bpc = normalizeBeatsPerChord(beatsPerChord);
+function currentPerformStepMs(): number {
+  const state = store.getState();
+  const { bpm, swing } = state.settings;
+  const bpc = effectiveBeatsPerChordForNode(state, performCursorNodeId);
   // For sub-beat values the timer fires every bpc beats; for whole beats it fires every 1 beat.
   const stepBeats = bpc < 1 ? bpc : 1;
   const beatMs = 60000 / clamp(bpm, 40, 240);
@@ -2778,7 +2877,7 @@ function currentPerformStepMs(stepCount: number): number {
     return stepMs;
   }
   const swingRatio = clamp(swing / 100, 0, 0.75);
-  const isOddStep = stepCount % 2 === 1;
+  const isOddStep = performStepCount % 2 === 1;
   const multiplier = isOddStep ? 1 - swingRatio * 0.5 : 1 + swingRatio * 0.5;
   return stepMs * multiplier;
 }
@@ -2787,7 +2886,7 @@ function scheduleNextPerformStep(): void {
   if (!performPlaying) {
     return;
   }
-  const delayMs = currentPerformStepMs(performStepCount);
+  const delayMs = currentPerformStepMs();
   performTimerId = window.setTimeout(() => {
     if (!performPlaying) {
       return;
@@ -2905,27 +3004,27 @@ function syncSelectionToNode(
 function performStep(): void {
   const state = store.getState();
   const graph = state.graph;
-  const beatsPerChord = normalizeBeatsPerChord(state.settings.beatsPerChord);
-  // Sub-beat: every step is a chord boundary. Whole-beat: boundary every beatsPerChord steps.
-  const stepsPerChord = beatsPerChord < 1 ? 1 : beatsPerChord;
-  const isChordBoundary = performStepCount % stepsPerChord === 0;
-  if (isChordBoundary) {
-    if (performCursorNodeId === null || !graph.nodes[performCursorNodeId]) {
-      performCursorNodeId = graph.headId;
-    } else {
-      performCursorNodeId = graph.nodes[performCursorNodeId]?.nextId ?? graph.headId;
-    }
+  const isChordBoundary = performBeatWithinChord === 0;
+  if (performCursorNodeId === null || !graph.nodes[performCursorNodeId]) {
+    performCursorNodeId = graph.headId;
+  } else if (isChordBoundary && performStepCount > 0) {
+    performCursorNodeId = graph.nodes[performCursorNodeId]?.nextId ?? graph.headId;
   }
 
   if (performCursorNodeId === null) {
     return;
   }
 
+  const nodeBeatsPerChord = effectiveBeatsPerChordForNode(state, performCursorNodeId);
+  // Sub-beat: every step is a chord boundary. Whole-beat: boundary every N beats.
+  const stepsPerChord = nodeBeatsPerChord < 1 ? 1 : nodeBeatsPerChord;
+  performCurrentChordSteps = stepsPerChord;
+
   if (isChordBoundary) {
     const chordName = graph.nodes[performCursorNodeId]?.chordName ?? "state";
-    const { bpm, beatsPerChord, bassPreset, accentStrength, humanizeAmount, layerWidth } = state.settings;
+    const { bpm, bassPreset, accentStrength, humanizeAmount, layerWidth } = state.settings;
     const beatMs = 60000 / clamp(bpm, 40, 240);
-    const sustainMs = normalizeBeatsPerChord(beatsPerChord) * beatMs * 0.92;
+    const sustainMs = nodeBeatsPerChord * beatMs * 0.92;
     const chordAccent = computeAccent(0, stepsPerChord, accentStrength);
     const humanizeDepth = clamp(humanizeAmount / 100, 0, 1);
     syncSelectionToNode(performCursorNodeId, `Performing ${chordName}`, {
@@ -2953,7 +3052,7 @@ function performStep(): void {
     // On non-boundary beats, handle beat-aware bass patterns (oom-pah, stride).
     const { bpm, bassPreset, accentStrength, humanizeAmount } = state.settings;
     const beatMs = 60000 / clamp(bpm, 40, 240);
-    const beatWithinChord = performStepCount % stepsPerChord;
+    const beatWithinChord = performBeatWithinChord;
     const node = performCursorNodeId !== null ? graph.nodes[performCursorNodeId] : null;
     const match = node ? findChordInCatalog(state.catalog, node.chordName) : null;
     const chordEntry = match ? state.catalog.families[match.familyIndex]?.chords[match.chordIndex] : null;
@@ -2969,6 +3068,12 @@ function performStep(): void {
       });
     }
   }
+
+  if (performBeatWithinChord + 1 >= performCurrentChordSteps) {
+    performBeatWithinChord = 0;
+  } else {
+    performBeatWithinChord += 1;
+  }
 }
 
 function startPerformLoop(options?: { resetCursor?: boolean }): void {
@@ -2976,6 +3081,8 @@ function startPerformLoop(options?: { resetCursor?: boolean }): void {
   stopPerformLoop();
   performPlaying = true;
   performStepCount = 0;
+  performBeatWithinChord = 0;
+  performCurrentChordSteps = 1;
   if (resetCursor) {
     performCursorNodeId = null;
   }
@@ -4291,6 +4398,116 @@ function bindPerformPanel(shell: HTMLElement): void {
   });
 }
 
+function openNodeTimingPanel(nodeId: number): void {
+  const state = store.getState();
+  store.setState({
+    ...state,
+    nodeTimingModalNodeId: nodeId,
+    settings: {
+      ...state.settings,
+      showNodeTimingPanel: true,
+    },
+    status: `Opened node timing for ${state.graph.nodes[nodeId]?.chordName ?? "node"}`,
+  });
+}
+
+function closeNodeTimingPanel(): void {
+  const state = store.getState();
+  store.setState({
+    ...state,
+    nodeTimingModalNodeId: null,
+    settings: {
+      ...state.settings,
+      showNodeTimingPanel: false,
+    },
+    status: "Node timing closed",
+  });
+}
+
+function bindNodeTimingPanel(shell: HTMLElement): void {
+  shell.querySelectorAll<HTMLElement>("[data-node-timing-action='close']").forEach((element) => {
+    element.addEventListener("click", () => {
+      closeNodeTimingPanel();
+    });
+  });
+
+  const nodeSelect = shell.querySelector<HTMLSelectElement>("select[data-node-timing-setting='node-id']");
+  nodeSelect?.addEventListener("change", () => {
+    const nodeId = Number(nodeSelect.value);
+    if (!Number.isFinite(nodeId)) {
+      return;
+    }
+    const state = store.getState();
+    store.setState({
+      ...state,
+      nodeTimingModalNodeId: nodeId,
+      status: `Editing timing for ${state.graph.nodes[nodeId]?.chordName ?? "node"}`,
+    });
+  });
+
+  const makeHeadButton = shell.querySelector<HTMLButtonElement>("button[data-node-timing-action='make-head']");
+  makeHeadButton?.addEventListener("click", () => {
+    const state = store.getState();
+    const nodeId = state.nodeTimingModalNodeId;
+    if (nodeId === null) {
+      return;
+    }
+    const node = state.graph.nodes[nodeId];
+    if (!node) {
+      return;
+    }
+    const graph = {
+      ...state.graph,
+      headId: nodeId,
+    };
+    saveGraph(graph);
+    store.setState({
+      ...state,
+      graph,
+      status: `Set ${node.chordName} as initial state`,
+    });
+    appendDebugLog(`[ui] set head id=${nodeId} chord="${node.chordName}" (modal)`);
+  });
+
+  const timingSelect = shell.querySelector<HTMLSelectElement>("select[data-node-timing-setting='beats-override']");
+  timingSelect?.addEventListener("change", () => {
+    const state = store.getState();
+    const nodeId = state.nodeTimingModalNodeId;
+    if (nodeId === null) {
+      return;
+    }
+    const node = state.graph.nodes[nodeId];
+    if (!node) {
+      return;
+    }
+    const override = timingSelect.value === "inherit"
+      ? null
+      : normalizeNodeBeatsOverride(Number(timingSelect.value));
+    const nextNode: GraphNode = {
+      ...node,
+      beatsPerChordOverride: override,
+    };
+    const graph = {
+      ...state.graph,
+      nodes: {
+        ...state.graph.nodes,
+        [nodeId]: nextNode,
+      },
+    };
+    saveGraph(graph);
+    store.setState({
+      ...state,
+      graph,
+      status: override === null
+        ? `Node ${node.chordName} now inherits global beats`
+        : `Node ${node.chordName} timing set to ${bpcLabel(override)}`,
+    });
+    appendDebugLog(
+      `[ui] node timing id=${nodeId} chord="${node.chordName}" override=${override === null ? "inherit" : override}`,
+    );
+  });
+}
+
 function bindSavedLoopsPanel(shell: HTMLElement): void {
   shell.querySelectorAll<HTMLElement>("[data-saved-loops-action='close']").forEach((element) => {
     element.addEventListener("click", () => {
@@ -4430,20 +4647,13 @@ function bindCanvasInteractions(canvas: HTMLCanvasElement): void {
       lastY: event.clientY,
     };
 
-    if (hit?.kind === "graph-node" && !startedOnCenter) {
-      const nodeId = hit.nodeId;
+    if (pressContext.mode === "drag-node" && pressContext.targetNodeId !== null) {
+      const nodeId = pressContext.targetNodeId;
       pressContext.longPressTimer = window.setTimeout(() => {
         if (!pressContext || pressContext.moved) return;
         pressContext.longPressTimer = null;
         pressContext.gestureHandled = true;
-        const s = store.getState();
-        const n = s.graph.nodes[nodeId];
-        if (n) {
-          const updatedGraph = { ...s.graph, headId: nodeId };
-          saveGraph(updatedGraph);
-          store.setState({ ...s, graph: updatedGraph, status: `Set ${n.chordName} as loop start` });
-          appendDebugLog(`[ui] set head id=${nodeId} chord="${n.chordName}"`);
-        }
+        openNodeTimingPanel(nodeId);
         if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
         pressContext = null;
       }, 550);
@@ -4644,6 +4854,7 @@ function mountStage(): void {
   bindCornerControls(shell);
   bindSettingsPanel(shell);
   bindPerformPanel(shell);
+  bindNodeTimingPanel(shell);
   bindSavedLoopsPanel(shell);
   bindDebugFooter(shell);
   bindCanvasInteractions(canvas);
@@ -4698,13 +4909,17 @@ function render(): void {
     : state.status;
 
   const stateForRender = { ...state, status: currentStatus };
-  const anyModalOpen = state.settings.showPanel || state.settings.showPerformPanel || state.settings.showSavedLoopsPanel;
-  const modalKey = `${state.settings.showPanel}-${state.settings.showPerformPanel}-${state.settings.showSavedLoopsPanel}`;
+  const anyModalOpen = state.settings.showPanel
+    || state.settings.showPerformPanel
+    || state.settings.showSavedLoopsPanel
+    || state.settings.showNodeTimingPanel;
+  const modalKey = `${state.settings.showPanel}-${state.settings.showPerformPanel}-${state.settings.showSavedLoopsPanel}-${state.settings.showNodeTimingPanel}-${state.nodeTimingModalNodeId ?? "none"}`;
   const shellExists = !!root.querySelector(".stage-shell");
   const canUseModalFastPath = anyModalOpen
     && shellExists
     && modalKey === prevModalKey
-    && !state.settings.showSavedLoopsPanel;
+    && !state.settings.showSavedLoopsPanel
+    && !state.settings.showNodeTimingPanel;
 
   // When a modal is already open and its visibility didn't change, skip full
   // innerHTML re-render to preserve open <select> dropdowns and focused inputs.

@@ -7,5 +7,7 @@ Click the label on the top left to change between numerals or chord names.
 
 Longpress play for perform actions.
 
+Longpress nodes for node playback specific options
+
 Pinch to zoom in/out.
 
