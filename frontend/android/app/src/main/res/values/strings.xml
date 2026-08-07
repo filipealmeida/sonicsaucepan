@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Sonic Saucepan</string>
+    <string name="title_activity_main">Sonic Saucepan</string>
+    <string name="package_name">com.sonicsaucepan.app</string>
+    <string name="custom_url_scheme">com.sonicsaucepan.app</string>
+</resources>

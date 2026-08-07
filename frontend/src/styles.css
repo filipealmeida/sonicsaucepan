@@ -320,6 +320,22 @@ body {
   overflow: hidden;
 }
 
+.debug-summary {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(108, 171, 255, 0.22);
+  background: rgba(7, 13, 26, 0.74);
+}
+
+.debug-summary-line {
+  color: rgba(210, 227, 255, 0.92);
+  font-family: "Courier New", Courier, monospace;
+  font-size: 0.74rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
 .debug-log {
   height: min(140px, 24vh);
   overflow-y: auto;
@@ -729,6 +745,10 @@ body {
     left: 8px;
     right: 8px;
     bottom: 8px;
+  }
+
+  .debug-summary {
+    padding: 8px 10px;
   }
 
   .debug-log {

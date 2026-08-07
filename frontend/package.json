@@ -4,13 +4,24 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "postinstall": "node scripts/patch-capacitor-java.mjs",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "capacitor:patch-java": "node scripts/patch-capacitor-java.mjs",
+    "android:sync": "npm run build && npx cap sync android && npm run capacitor:patch-java",
+    "android:open": "npx cap open android",
+    "android:apk:debug": "npm run android:sync && cd android && ./gradlew assembleDebug",
+    "android:apk:release": "npm run android:sync && cd android && ./gradlew assembleRelease",
+    "android:bundle:release": "npm run android:sync && cd android && ./gradlew bundleRelease",
+    "android:install:usb": "npm run android:apk:debug && bash scripts/install-android-usb.sh"
   },
   "dependencies": {
+    "@capacitor/android": "7.4.3",
+    "@capacitor/core": "7.4.3",
     "zustand": "^5.0.8"
   },
   "devDependencies": {
+    "@capacitor/cli": "7.4.3",
     "typescript": "^5.9.2",
     "vite": "^6.1.0"
   }

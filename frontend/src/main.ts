@@ -1,5 +1,7 @@
+import { Capacitor, type PluginListenerHandle } from "@capacitor/core";
 import { createStore } from "zustand/vanilla";
 import catalogJson from "../../assets/chords/chord_strategy_A1.json";
+import { NativeMidi } from "./plugins/native-midi";
 import "./styles.css";
 
 type ChordEntry = {
@@ -292,7 +294,7 @@ const GRAPH_NODE_TYPE_REGISTRY: Record<GraphNodeType, GraphNodeTypeConfig> = {
 
 type MidiOutputLike = {
   id: string;
-  name?: string;
+  name?: string | null;
   send: (data: number[]) => void;
 };
 
@@ -300,15 +302,19 @@ type MidiAccessLike = {
   outputs?: {
     get?: (id: string) => MidiOutputLike | undefined;
     forEach?: (callback: (value: MidiOutputLike) => void) => void;
-    [Symbol.iterator]?: () => Iterator<[string, MidiOutputLike]>;
     values?: () => IterableIterator<MidiOutputLike>;
   };
-  onstatechange: ((event: Event) => void) | null;
+  onstatechange: ((event: unknown) => void) | null;
 };
 
 type MidiRequestOptions = {
   sysex?: boolean;
 };
+
+type MidiBackend = "web" | "native";
+
+const WEB_MIDI_UNAVAILABLE_STATUS = "Web MIDI unavailable. In Firefox on Linux, enable dom.webmidi.enabled in about:config and reload.";
+const NATIVE_MIDI_UNAVAILABLE_STATUS = "Native Android MIDI unavailable on this device.";
 
 const root = document.getElementById("app");
 if (!root) {
@@ -1792,7 +1798,9 @@ function playBassNotes(
 
 let audioContextRef: AudioContext | null = null;
 let midiAccessRef: MidiAccessLike | null = null;
+let midiBackendRef: MidiBackend | null = null;
 let midiStateListenerBound = false;
+let midiPortsListenerHandle: PluginListenerHandle | null = null;
 
 function getAudioContext(): AudioContext {
   if (audioContextRef) {
@@ -1806,6 +1814,82 @@ function getAudioContext(): AudioContext {
 
   audioContextRef = new Ctx();
   return audioContextRef;
+}
+
+function prefersNativeMidiBridge(): boolean {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android";
+}
+
+function midiUnavailableStatusMessage(): string {
+  return prefersNativeMidiBridge() ? NATIVE_MIDI_UNAVAILABLE_STATUS : WEB_MIDI_UNAVAILABLE_STATUS;
+}
+
+function normalizeMidiPortName(name: string | null | undefined, fallbackId: string): string {
+  const trimmed = typeof name === "string" ? name.trim() : "";
+  return trimmed.length > 0 ? trimmed : `MIDI ${fallbackId}`;
+}
+
+function collectWebMidiPorts(access: MidiAccessLike): MidiPortOption[] {
+  const ports: MidiPortOption[] = [];
+  const outputs = access.outputs;
+  if (outputs?.forEach) {
+    outputs.forEach((output) => {
+      ports.push({ id: output.id, name: normalizeMidiPortName(output.name, output.id) });
+    });
+    return ports;
+  }
+  if (outputs?.values) {
+    for (const output of outputs.values()) {
+      ports.push({ id: output.id, name: normalizeMidiPortName(output.name, output.id) });
+    }
+  }
+  return ports;
+}
+
+async function collectNativeMidiPorts(): Promise<MidiPortOption[]> {
+  const response = await NativeMidi.listOutputs();
+  return response.ports.map((port) => ({
+    id: port.id,
+    name: normalizeMidiPortName(port.name, port.id),
+  }));
+}
+
+async function bindMidiStateListener(backend: MidiBackend, access?: MidiAccessLike): Promise<void> {
+  if (midiStateListenerBound) {
+    return;
+  }
+
+  if (backend === "native") {
+    midiPortsListenerHandle = await NativeMidi.addListener("portsChanged", () => {
+      void refreshMidiPorts();
+    });
+    midiStateListenerBound = true;
+    return;
+  }
+
+  if (access) {
+    access.onstatechange = () => {
+      void refreshMidiPorts();
+    };
+    midiStateListenerBound = true;
+  }
+}
+
+function resolveConfiguredMidiPortName(settings: AppSettings): string {
+  return settings.midiPorts.find((port) => port.id === settings.midiPortId)?.name ?? settings.midiPortId;
+}
+
+async function sendMidiData(portId: string, data: number[]): Promise<void> {
+  if (midiBackendRef === "native") {
+    await NativeMidi.send({ portId, data });
+    return;
+  }
+
+  const selectedOutput = resolveMidiOutput(portId);
+  if (!selectedOutput) {
+    throw new Error(`MIDI port not found: ${portId}`);
+  }
+  selectedOutput.send(data);
 }
 
 function resolveMidiOutput(portId: string): MidiOutputLike | null {
@@ -1843,13 +1927,12 @@ function sendMidiPreview(chord: ChordEntry, sustainMs = 920, midiNotesOverride?:
     return;
   }
 
-  if (!midiAccessRef) {
-    appendDebugLog(`[midi] skipped — no MIDI access (enable MIDI in settings)`);
+  if (!midiBackendRef || (midiBackendRef === "web" && !midiAccessRef)) {
+    appendDebugLog("[midi] skipped - no MIDI access (enable MIDI in settings)");
     return;
   }
 
-  const selectedOutput = resolveMidiOutput(settings.midiPortId);
-  if (!selectedOutput) {
+  if (midiBackendRef === "web" && !resolveMidiOutput(settings.midiPortId)) {
     appendDebugLog(`[midi] port not found: ${settings.midiPortId}`);
     return;
   }
@@ -1862,16 +1945,23 @@ function sendMidiPreview(chord: ChordEntry, sustainMs = 920, midiNotesOverride?:
   const noteOn = 0x90 + channel;
   const noteOff = 0x80 + channel;
   const chordLabel = labelOverride ?? chord.full_name;
+  const portName = resolveConfiguredMidiPortName(settings);
 
-  appendDebugLog(`[midi] ch${channel + 1} ${chordLabel} notes=[${midiNotes.join(',')}] port=${selectedOutput.name ?? settings.midiPortId}`);
+  appendDebugLog(`[midi] ch${channel + 1} ${chordLabel} notes=[${midiNotes.join(',')}] port=${portName}`);
 
   midiNotes.forEach((note) => {
-    selectedOutput.send([noteOn, note, 96]);
+    void sendMidiData(settings.midiPortId, [noteOn, note, 96]).catch((error: unknown) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      appendDebugLog(`[midi] send failed: ${detail}`);
+    });
   });
 
   window.setTimeout(() => {
     midiNotes.forEach((note) => {
-      selectedOutput.send([noteOff, note, 0]);
+      void sendMidiData(settings.midiPortId, [noteOff, note, 0]).catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        appendDebugLog(`[midi] send failed: ${detail}`);
+      });
     });
   }, Math.max(100, sustainMs - 80));
 }
@@ -1977,7 +2067,29 @@ function playChordPreview(
 }
 
 async function ensureMidiAccess(): Promise<MidiAccessLike | null> {
+  if (prefersNativeMidiBridge()) {
+    if (midiBackendRef === "native") {
+      return {} as MidiAccessLike;
+    }
+
+    try {
+      const availability = await NativeMidi.isSupported();
+      if (!availability.supported) {
+        appendDebugLog("[midi] Native Android MIDI bridge is unavailable");
+        return null;
+      }
+      midiBackendRef = "native";
+      appendDebugLog("[midi] Native Android MIDI bridge ready");
+      return {} as MidiAccessLike;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      appendDebugLog(`[midi] Native MIDI initialization failed: ${detail}`);
+      return null;
+    }
+  }
+
   if (midiAccessRef) {
+    midiBackendRef = "web";
     return midiAccessRef;
   }
 
@@ -1992,10 +2104,11 @@ async function ensureMidiAccess(): Promise<MidiAccessLike | null> {
   try {
     // Some browsers are picky about options; prefer explicit non-sysex, then fallback.
     try {
-      midiAccessRef = await nav.requestMIDIAccess({ sysex: false });
+      midiAccessRef = await nav.requestMIDIAccess({ sysex: false }) as unknown as MidiAccessLike;
     } catch {
-      midiAccessRef = await nav.requestMIDIAccess();
+      midiAccessRef = await nav.requestMIDIAccess() as unknown as MidiAccessLike;
     }
+    midiBackendRef = "web";
     appendDebugLog("[midi] MIDI access granted");
     return midiAccessRef;
   } catch (error) {
@@ -2018,27 +2131,15 @@ async function refreshMidiPorts(): Promise<void> {
     store.setState({
       ...state,
       settings,
-      status: "Web MIDI unavailable. In Firefox on Linux, enable dom.webmidi.enabled in about:config and reload.",
+      status: midiUnavailableStatusMessage(),
     });
-    appendDebugLog("[midi] Web MIDI unavailable. On Firefox/Linux enable dom.webmidi.enabled and reload.");
+    appendDebugLog(`[midi] ${midiUnavailableStatusMessage()}`);
     return;
   }
 
-  const ports: MidiPortOption[] = [];
-  const outputs = access.outputs;
-  if (outputs?.forEach) {
-    outputs.forEach((output) => {
-      ports.push({ id: output.id, name: output.name ?? `MIDI ${output.id}` });
-    });
-  } else if (outputs?.values) {
-    for (const output of outputs.values()) {
-      ports.push({ id: output.id, name: output.name ?? `MIDI ${output.id}` });
-    }
-  } else if (outputs?.[Symbol.iterator]) {
-    for (const [, output] of outputs) {
-      ports.push({ id: output.id, name: output.name ?? `MIDI ${output.id}` });
-    }
-  }
+  const ports = midiBackendRef === "native"
+    ? await collectNativeMidiPorts()
+    : collectWebMidiPorts(access);
 
   const state = store.getState();
   const hasSelected = ports.some((port) => port.id === state.settings.midiPortId);
@@ -2059,16 +2160,13 @@ async function refreshMidiPorts(): Promise<void> {
   if (ports.length === 0) {
     store.setState({
       ...store.getState(),
-      status: "No MIDI outputs detected. On Firefox/Linux, verify Web MIDI is enabled and a port is exposed.",
+      status: "No MIDI outputs detected on this device.",
     });
     appendDebugLog("[midi] No MIDI output ports detected");
   }
 
   if (!midiStateListenerBound) {
-    access.onstatechange = () => {
-      void refreshMidiPorts();
-    };
-    midiStateListenerBound = true;
+    await bindMidiStateListener(midiBackendRef ?? "web", midiBackendRef === "web" ? access : undefined);
   }
 }
 
@@ -2157,6 +2255,26 @@ function appendDebugLog(message: string): void {
     ...state,
     debugLogs: nextLogs,
   });
+}
+
+function debugPanelMidiSummary(state: AppState): string[] {
+  const preferredBackend = prefersNativeMidiBridge() ? "native-android" : "web-midi";
+  const activeBackend = midiBackendRef ?? "inactive";
+  const configuredPort = state.settings.midiPortId
+    ? resolveConfiguredMidiPortName(state.settings)
+    : "none";
+  const portNames = state.settings.midiPorts.length > 0
+    ? state.settings.midiPorts.map((port) => port.name).join(", ")
+    : "none";
+  const audioState = audioContextRef?.state ?? "not-created";
+
+  return [
+    `platform=${Capacitor.getPlatform()} native=${Capacitor.isNativePlatform() ? "yes" : "no"}`,
+    `midi enabled=${state.settings.midiEnabled ? "yes" : "no"} preferred=${preferredBackend} active=${activeBackend}`,
+    `midi channel=${state.settings.midiChannel} selected-port=${configuredPort}`,
+    `midi outputs(${state.settings.midiPorts.length})=${portNames}`,
+    `audio-context=${audioState} status=${state.status}`,
+  ];
 }
 
 function saveInteractionState(): void {
@@ -2789,12 +2907,16 @@ function buildDebugFooter(state: AppState): string {
     return "";
   }
 
+  const summaryRows = debugPanelMidiSummary(state)
+    .map((line) => `<div class="debug-summary-line">${escapeHtml(line)}</div>`)
+    .join("");
   const rows = state.debugLogs
     .map((line) => `<div class="debug-log-line">${escapeHtml(line)}</div>`)
     .join("");
 
   return `
     <section class="debug-footer" aria-label="Debug footer">
+      <div class="debug-summary" data-debug-summary>${summaryRows}</div>
       <div class="debug-log" data-debug-log>${rows}</div>
       <form class="debug-input-row" data-debug-form>
         <span class="debug-prompt">&gt;</span>
